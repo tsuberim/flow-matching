@@ -1,0 +1,9 @@
+torch
+torchvision
+scipy
+matplotlib
+einops
+tqdm
+yt-dlp
+opencv-python
+numpy

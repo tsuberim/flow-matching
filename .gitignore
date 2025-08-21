@@ -1,0 +1,5 @@
+videos
+*.pt
+*.pth
+data
+__pycache__
