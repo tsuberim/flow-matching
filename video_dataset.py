@@ -77,25 +77,25 @@ class VideoFrameDataset(Dataset):
             estimated_subsampled_frames = int(max(0, usable_duration) / self.target_frame_interval)
             print(f"Estimated frames after subsampling: ~{estimated_subsampled_frames:,}")
         else:
-            # Original behavior: use subset from 3/4 into video
-            section_duration = duration * 0.5  # We'll use middle 50% of video
-            estimated_subsampled_frames = int(section_duration / self.target_frame_interval)
+            # Load from beginning (after 30s skip) when num_frames is specified
+            skip_seconds = 30.0
+            skip_frames = int(skip_seconds * self.original_fps)
+            print(f"Loading {self.num_frames} frames from beginning (skipping first {skip_seconds}s / {skip_frames:,} frames)")
             
-            if estimated_subsampled_frames < self.num_frames:
-                print(f"Warning: Video section has only ~{estimated_subsampled_frames} subsampled frames, using all available")
-                self.num_frames = estimated_subsampled_frames
-            
-            # Calculate 3/4 section timing
-            three_quarter_time = duration * 0.75
-            section_start_time = max(0, three_quarter_time - (self.num_frames * self.target_frame_interval) / 2)
-            
-            # Convert times back to frame indices for the scan range
-            self.start_frame = max(0, int(section_start_time * self.original_fps))
-            # Add buffer for time-based sampling
+            self.start_frame = min(skip_frames, total_frames - 1)
+            # Calculate how many original frames we need to scan to get num_frames subsampled frames
             estimated_frames_needed = int(self.num_frames * self.target_frame_interval * self.original_fps) + 100
             self.end_frame = min(total_frames, self.start_frame + estimated_frames_needed)
             
-            print(f"Using frames {self.start_frame:,} to {self.end_frame:,} from 3/4 into video")
+            # Check if we have enough frames
+            usable_duration = (self.end_frame - self.start_frame) / self.original_fps
+            estimated_subsampled_frames = int(usable_duration / self.target_frame_interval)
+            
+            if estimated_subsampled_frames < self.num_frames:
+                print(f"Warning: Available section has only ~{estimated_subsampled_frames} subsampled frames, using all available")
+                self.num_frames = estimated_subsampled_frames
+            
+            print(f"Using frames {self.start_frame:,} to {self.end_frame:,} from beginning of video")
         
         print(f"Target size: {self.target_size[0]}x{self.target_size[1]}")
         

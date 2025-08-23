@@ -225,10 +225,6 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Gradient clipping to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
 
-            # Print mean gradient norm across all parameters
-            total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in vae.parameters() if p.grad is not None]))
-            print(f"Mean grad norm: {total_norm.item():.4f}")
-            
             optimizer.step()
             
             # Accumulate losses
@@ -408,7 +404,7 @@ if __name__ == "__main__":
         lr=1e-5,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
-        num_frames=150000,  # Use subset for faster training
+        num_frames=None,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
         model_size=4,  # Model size multiplier
         project_name="video-vae"
