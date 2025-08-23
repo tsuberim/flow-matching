@@ -140,9 +140,16 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Load model weights from safetensors
             model_state = load_file(checkpoint_path)
             
-            # Remove 'module.' prefix if loading DataParallel weights to single GPU model
-            if any(key.startswith('module.') for key in model_state.keys()):
+            # Handle DataParallel loading properly
+            is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
+            is_current_dataparallel = isinstance(vae, torch.nn.DataParallel)
+            
+            if is_dataparallel_checkpoint and not is_current_dataparallel:
+                # Loading DataParallel weights into single model
                 model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            elif not is_dataparallel_checkpoint and is_current_dataparallel:
+                # Loading single model weights into DataParallel
+                model_state = {f'module.{k}': v for k, v in model_state.items()}
             
             vae.load_state_dict(model_state)
             
@@ -156,6 +163,9 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
         except (FileNotFoundError, KeyError) as e:
             print(f"Checkpoint metadata found but model loading failed: {e}")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Starting from scratch instead...")
     else:
         print(f"No checkpoint found, starting from scratch")
     
@@ -317,9 +327,16 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     try:
         model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
         
-        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
-        if any(key.startswith('module.') for key in model_state.keys()):
+        # Handle DataParallel loading properly
+        is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
+        is_current_dataparallel = isinstance(vae, torch.nn.DataParallel)
+        
+        if is_dataparallel_checkpoint and not is_current_dataparallel:
+            # Loading DataParallel weights into single model
             model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+        elif not is_dataparallel_checkpoint and is_current_dataparallel:
+            # Loading single model weights into DataParallel
+            model_state = {f'module.{k}': v for k, v in model_state.items()}
         
         vae.load_state_dict(model_state)
         print(f"Loaded trained VAE model")
