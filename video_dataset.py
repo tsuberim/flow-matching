@@ -34,12 +34,9 @@ class VideoFrameDataset(Dataset):
         # Get video info and create frame mapping
         self._analyze_video()
         
-        # Create frame mapping instead of preloading
-        print("Computing frame mapping for lazy loading...")
-        self._create_frame_mapping()
-        
-        # Single video capture instance (no multiprocessing)
-        self._video_cap = None
+        # Preload all frames into memory
+        print("Preloading all frames into memory...")
+        self._preload_frames()
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -100,9 +97,14 @@ class VideoFrameDataset(Dataset):
         
         cap.release()
     
-    def _create_frame_mapping(self):
-        """Create mapping from subsampled indices to real video frame indices"""
-        self.frame_indices = []
+    def _preload_frames(self):
+        """Preload all frames into memory"""
+        # Open video capture for preloading
+        cap = cv2.VideoCapture(self.video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {self.video_path}")
+        
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
         # Time-based sampling variables
         current_time = 0.0
@@ -113,15 +115,24 @@ class VideoFrameDataset(Dataset):
         # Update loop condition for when num_frames is None
         target_frames = self.num_frames if self.num_frames is not None else float('inf')
         
-        print(f"Mapping frames from {self.start_frame} to {self.end_frame}")
+        self.frames = []  # Store actual frame tensors
         
-        with tqdm(total=self.end_frame - self.start_frame, desc="Computing frame mapping") as pbar:
+        print(f"Preloading frames from {self.start_frame} to {self.end_frame}")
+        
+        with tqdm(total=self.end_frame - self.start_frame, desc="Preloading frames") as pbar:
             while frames_collected < target_frames and frame_index < self.end_frame:
                 # Check if current time matches or exceeds next target time
                 if current_time >= next_target_time:
-                    # Store this frame index for lazy loading
-                    self.frame_indices.append(frame_index)
-                    frames_collected += 1
+                    # Load and process this frame
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                    ret, frame = cap.read()
+                    
+                    if ret:
+                        processed_frame = self._process_frame(frame)
+                        self.frames.append(processed_frame)
+                        frames_collected += 1
+                    else:
+                        print(f"Warning: Could not read frame {frame_index}")
                     
                     # Update next target time
                     next_target_time += self.target_frame_interval
@@ -131,13 +142,27 @@ class VideoFrameDataset(Dataset):
                 frame_index += 1
                 pbar.update(1)
         
+        cap.release()
+        
         # Update actual number of frames (only if it was originally None)
         if self.num_frames is None:
-            self.num_frames = len(self.frame_indices)
+            self.num_frames = len(self.frames)
         
-        print(f"Created mapping for {len(self.frame_indices):,} time-subsampled frames")
-        print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
-        print(f"Frame range: {self.frame_indices[0]} to {self.frame_indices[-1]}")
+        # Stack all frames into a single tensor for efficient memory layout
+        if self.frames:
+            print("Stacking frames into tensor...")
+            self.frames_tensor = torch.stack(self.frames, dim=0)  # [num_frames, C, H, W]
+            # Clear the list to save memory
+            self.frames.clear()
+            self.frames = None
+            
+            print(f"Preloaded {len(self.frames_tensor):,} frames into stacked tensor")
+            print(f"Tensor shape: {self.frames_tensor.shape}")
+            print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
+            print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
+        else:
+            self.frames_tensor = torch.empty(0, 3, *self.target_size[::-1])
+            print("No frames loaded")
     
     def _process_frame(self, frame):
         """Process a single frame: resize and convert to tensor"""
@@ -155,64 +180,29 @@ class VideoFrameDataset(Dataset):
         
         return tensor
     
-    def _get_video_cap(self):
-        """Get or create a video capture instance"""
-        if self._video_cap is None:
-            # Check if file exists
-            if not os.path.exists(self.video_path):
-                raise FileNotFoundError(f"Video file not found: {self.video_path}")
-            
-            self._video_cap = cv2.VideoCapture(self.video_path)
-            self._video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
-            if not self._video_cap.isOpened():
-                raise ValueError(f"Could not open video file: {self.video_path}")
-        
-        return self._video_cap
-    
-    def _load_frame_by_index(self, mapped_idx):
-        """Load a single frame by its mapped index"""
-        if mapped_idx >= len(self.frame_indices):
-            raise IndexError(f"Mapped index {mapped_idx} out of range for {len(self.frame_indices)} frames")
-        
-        real_frame_idx = self.frame_indices[mapped_idx]
-        
-        # Get video capture instance
-        cap = self._get_video_cap()
-        
-        # Set video position to the desired frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
-        ret, frame = cap.read()
-        
-        if not ret:
-            raise RuntimeError(f"Could not read frame {real_frame_idx} from video")
-        
-        return self._process_frame(frame)
+    def _get_frame_by_index(self, idx):
+        """Get a preloaded frame by index from stacked tensor"""
+        if idx >= len(self.frames_tensor):
+            raise IndexError(f"Frame index {idx} out of range for {len(self.frames_tensor)} preloaded frames")
+        return self.frames_tensor[idx]
     
     def __len__(self):
         # Number of possible sequences (accounting for sequence length)
-        return max(0, len(self.frame_indices) - self.sequence_length + 1)
+        return max(0, len(self.frames_tensor) - self.sequence_length + 1)
     
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of range for {len(self)} sequences")
         
-        # Lazily load sequence of frames starting at idx
-        sequence = []
-        for i in range(self.sequence_length):
-            frame = self._load_frame_by_index(idx + i)
-            sequence.append(frame)
-        
-        # Stack into tensor: (sequence_length, channels, height, width)
-        return torch.stack(sequence, dim=0)
+        # Get sequence using tensor slicing (much faster than individual access)
+        return self.frames_tensor[idx:idx + self.sequence_length]
     
     def __del__(self):
-        """Cleanup: release video capture"""
-        if hasattr(self, '_video_cap') and self._video_cap is not None:
-            try:
-                self._video_cap.release()
-            except:
-                pass
+        """Cleanup: clear preloaded frames tensor"""
+        if hasattr(self, 'frames_tensor'):
+            del self.frames_tensor
+        if hasattr(self, 'frames') and self.frames is not None:
+            self.frames.clear()
 
 
 def find_video_file(video_dir='./videos'):
