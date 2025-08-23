@@ -72,7 +72,7 @@ def log_reconstruction_to_wandb(original, reconstruction, epoch):
 
 
 def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8, 
-              num_frames=10000, visualize_every=10, model_size=1, project_name="video-vae"):
+              num_frames=None, visualize_every=10, model_size=1, project_name="video-vae"):
     """
     Train the VAE on video frames
     
