@@ -119,12 +119,22 @@ class VideoFrameDataset(Dataset):
         """Load frames from H5 cache if valid"""
         try:
             with h5py.File(cache_path, 'r') as f:
-                # Validate cache metadata
+                # Validate cache metadata (decode video_path from bytes)
+                video_path_bytes = f.attrs['video_path']
+                if isinstance(video_path_bytes, bytes):
+                    cached_video_path = video_path_bytes.decode('utf-8')
+                else:
+                    cached_video_path = str(video_path_bytes)
+                
+                cached_num_frames = f.attrs['num_frames']
+                if cached_num_frames == -1:
+                    cached_num_frames = None
+                
                 if (f.attrs['target_width'] == self.target_size[0] and
                     f.attrs['target_height'] == self.target_size[1] and
                     f.attrs['target_fps'] == self.target_fps and
-                    f.attrs['num_frames'] == self.num_frames and
-                    f.attrs['video_path'] == self.video_path):
+                    cached_num_frames == self.num_frames and
+                    cached_video_path == self.video_path):
                     
                     # Load frames dataset
                     frames_data = f['frames'][:]
@@ -138,28 +148,60 @@ class VideoFrameDataset(Dataset):
             print(f"Cache loading failed: {e}, regenerating...")
             return False
     
-    def _save_to_h5_cache(self, cache_path):
-        """Save frames to H5 cache with metadata"""
+    def _init_h5_cache(self, cache_path, total_frames):
+        """Initialize H5 cache file with preallocated dataset"""
         try:
             with h5py.File(cache_path, 'w') as f:
-                # Save frames data with compression
-                f.create_dataset('frames', data=self.frames_tensor.numpy(), 
-                               compression='gzip', compression_opts=1, shuffle=True)
+                # Create resizable dataset for frames
+                h, w = self.target_size[1], self.target_size[0]
+                f.create_dataset('frames', 
+                               shape=(0, 3, h, w), 
+                               maxshape=(total_frames, 3, h, w),
+                               dtype=np.float32,
+                               compression='gzip', 
+                               compression_opts=1, 
+                               shuffle=True,
+                               chunks=(min(50, total_frames), 3, h, w))
                 
-                # Save metadata as attributes
-                f.attrs['target_width'] = self.target_size[0]
-                f.attrs['target_height'] = self.target_size[1]
-                f.attrs['target_fps'] = self.target_fps
-                f.attrs['num_frames'] = self.num_frames
-                f.attrs['video_path'] = self.video_path
-                f.attrs['total_frames'] = len(self.frames_tensor)
+                # Save metadata as attributes (ensure string encoding)
+                f.attrs['target_width'] = int(self.target_size[0])
+                f.attrs['target_height'] = int(self.target_size[1])
+                f.attrs['target_fps'] = float(self.target_fps)
+                f.attrs['num_frames'] = int(self.num_frames) if self.num_frames is not None else -1
+                f.attrs['video_path'] = str(self.video_path).encode('utf-8')
+                f.attrs['total_frames'] = int(total_frames)
+                f.attrs['frames_written'] = 0  # Track progress
                 
-            print(f"Cached {len(self.frames_tensor)} frames to H5: {cache_path}")
+            print(f"Initialized H5 cache: {cache_path}")
+            return True
         except Exception as e:
-            print(f"Warning: Could not save H5 cache: {e}")
-            # Remove partial cache file
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
+            print(f"Warning: Could not initialize H5 cache: {e}")
+            return False
+    
+    def _append_frames_to_h5(self, cache_path, frame_batch, start_idx):
+        """Append batch of frames to H5 cache"""
+        try:
+            with h5py.File(cache_path, 'a') as f:
+                dataset = f['frames']
+                current_size = dataset.shape[0]
+                new_size = current_size + len(frame_batch)
+                
+                # Resize dataset and append new frames
+                dataset.resize((new_size, 3, self.target_size[1], self.target_size[0]))
+                
+                # Convert frame batch to numpy if needed
+                if isinstance(frame_batch, torch.Tensor):
+                    frame_data = frame_batch.numpy()
+                else:
+                    frame_data = np.array(frame_batch)
+                
+                dataset[current_size:new_size] = frame_data
+                
+                # Update progress counter
+                f.attrs['frames_written'] = new_size
+                
+        except Exception as e:
+            print(f"Warning: Could not append to H5 cache: {e}")
     
     def _preload_frames(self):
         """Preload frames with H5 caching and optimized batch processing"""
@@ -170,16 +212,9 @@ class VideoFrameDataset(Dataset):
             if self._load_from_h5_cache(cache_path):
                 return  # Successfully loaded from cache
         
-        print("Processing frames (will cache to H5)...")
-        # Open video capture for preloading
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video file: {self.video_path}")
+        print("Processing frames (will stream to H5 cache)...")
         
-        # Disable buffering for more predictable frame access
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        # First pass: determine which frame indices we need
+        # Determine target frame indices first
         target_frame_indices = self._compute_target_frame_indices()
         
         if not target_frame_indices:
@@ -187,9 +222,13 @@ class VideoFrameDataset(Dataset):
             print("No frames to load")
             return
         
-        # Preallocate tensor for better memory efficiency
         num_frames = len(target_frame_indices)
-        h, w = self.target_size[1], self.target_size[0]  # target_size is (width, height)
+        
+        # Initialize H5 cache for streaming writes
+        cache_initialized = self._init_h5_cache(cache_path, num_frames)
+        
+        # Preallocate tensor for in-memory access
+        h, w = self.target_size[1], self.target_size[0]
         self.frames_tensor = torch.empty(num_frames, 3, h, w, dtype=torch.float32)
         
         print(f"Preloading {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
@@ -208,37 +247,48 @@ class VideoFrameDataset(Dataset):
             batch_indices = target_frame_indices[batch_start:batch_end]
             frame_batches.append((self.video_path, batch_indices, self.target_size))
         
-        cap.release()  # Close main capture before spawning workers
+        # No cap to release in streaming version
         
-        # Process batches in parallel 
+        # Process batches in parallel with H5 streaming
         frames_loaded = 0
+        import threading
+        h5_write_lock = threading.Lock()  # Protect H5 writes from concurrent access
+        
         try:
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                with tqdm(total=num_frames, desc="Loading frames", unit="frames") as pbar:
-                    # Submit all tasks
-                    future_to_batch = {executor.submit(VideoFrameDataset._load_and_process_frame_batch, batch): i 
-                                      for i, batch in enumerate(frame_batches)}
+                with tqdm(total=num_frames, desc="Loading & caching", unit="frames") as pbar:
+                    # Submit all tasks with start indices
+                    future_to_batch = {}
+                    for i, batch in enumerate(frame_batches):
+                        start_idx = i * batch_size
+                        future_to_batch[executor.submit(VideoFrameDataset._load_and_process_frame_batch, batch)] = (i, start_idx)
                     
                     # Process results as they complete
                     for future in as_completed(future_to_batch):
+                        batch_idx, tensor_start_idx = future_to_batch[future]
                         try:
                             batch_frames = future.result()
                             if batch_frames:
-                                # Convert numpy arrays to tensors efficiently
                                 batch_size_actual = len(batch_frames)
+                                
+                                # Store in tensor for fast access
                                 for i, frame_array in enumerate(batch_frames):
                                     frame_tensor = torch.from_numpy(frame_array)
-                                    self.frames_tensor[frames_loaded + i] = frame_tensor
+                                    self.frames_tensor[tensor_start_idx + i] = frame_tensor
+                                
+                                # Stream to H5 cache (thread-safe)
+                                if cache_initialized:
+                                    with h5_write_lock:
+                                        self._append_frames_to_h5(cache_path, batch_frames, tensor_start_idx)
+                                
                                 frames_loaded += batch_size_actual
                                 pbar.update(batch_size_actual)
-                                
-                                # Update progress info more frequently
-                                if frames_loaded % (batch_size * 2) == 0:  # Every 2 batches
-                                    elapsed = pbar.format_dict.get('elapsed', 1)
-                                    rate = frames_loaded / elapsed if elapsed > 0 else 0
-                                    pbar.set_postfix({"loaded": frames_loaded, "rate": f"{rate:.1f} fps"})
+                                pbar.set_postfix({
+                                    'loaded': frames_loaded,
+                                    'cached': f'{frames_loaded/num_frames*100:.1f}%'
+                                })
                         except Exception as e:
-                            print(f"Batch processing error: {e}")
+                            print(f"Error processing batch {batch_idx}: {e}")
         except Exception as e:
             print(f"Parallel processing failed ({e}), falling back to sequential processing...")
             # Fallback to sequential processing
@@ -269,9 +319,7 @@ class VideoFrameDataset(Dataset):
         print(f"Tensor shape: {self.frames_tensor.shape}")
         print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
         print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
-        
-        # Save to H5 cache for future runs
-        self._save_to_h5_cache(cache_path)
+        print(f"H5 cache updated incrementally during processing")
     
     def _compute_target_frame_indices(self):
         """Compute which frame indices we need based on time sampling"""
@@ -556,7 +604,7 @@ def save_sample_video(dataset, output_dir='./samples', video_length=64, fps=12):
 if __name__ == "__main__":
     # Example usage with all frames (12 FPS subsampling)
     print("Loading ALL frames from video...")
-    dataset = create_video_dataset(num_frames=None, target_fps=12)
+    dataset = create_video_dataset(num_frames=1000, target_fps=12)
     
     print(f"Dataset length: {len(dataset)}")
     print(f"Frame shape: {dataset[0].shape}")

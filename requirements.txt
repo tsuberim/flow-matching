@@ -9,3 +9,4 @@ opencv-python
 numpy
 wandb
 safetensors
+h5py
