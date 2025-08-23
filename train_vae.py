@@ -221,13 +221,13 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             
             # Backward pass
             loss.backward()
-            
-            # Gradient clipping to prevent exploding gradients - much more aggressive for large model
-            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=0.1)
-            
-            # Monitor gradient norms for debugging
-            if batch_idx % 100 == 0:
-                print(f"Gradient norm: {grad_norm:.4f}")
+
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+
+            # Print mean gradient norm across all parameters
+            total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in vae.parameters() if p.grad is not None]))
+            print(f"Mean grad norm: {total_norm.item():.4f}")
             
             optimizer.step()
             
