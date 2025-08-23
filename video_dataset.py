@@ -168,13 +168,25 @@ class VideoFrameDataset(Dataset):
             if self._process_video_cap is not None:
                 self._process_video_cap.release()
             
-            # Create new capture for this process
+            # Create new capture for this process with error handling
+            print(f"Creating video capture for process {current_pid}: {self.video_path}")
+            
+            # Check if file exists
+            if not os.path.exists(self.video_path):
+                raise FileNotFoundError(f"Video file not found: {self.video_path}")
+            
             self._process_video_cap = cv2.VideoCapture(self.video_path)
             self._process_video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            # Try setting additional properties for remote stability
+            self._process_video_cap.set(cv2.CAP_PROP_FORMAT, -1)  # Use default format
+            
             self._current_process_id = current_pid
             
             if not self._process_video_cap.isOpened():
                 raise ValueError(f"Could not open video file in process {current_pid}: {self.video_path}")
+            
+            print(f"✅ Video capture created successfully for process {current_pid}")
         
         return self._process_video_cap
     
