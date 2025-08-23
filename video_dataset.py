@@ -129,7 +129,7 @@ class VideoFrameDataset(Dataset):
         
         # Parallel processing setup with smaller batches for real-time feedback
         num_workers = min(mp.cpu_count(), 24)
-        batch_size = max(10, min(50, num_frames // (num_workers * 8)))  # Smaller batches for more frequent updates
+        batch_size = max(8, min(128, num_frames // (num_workers * 8)))  # Smaller batches for more frequent updates
         
         print(f"Using {num_workers} workers with batch size {batch_size}")
         
