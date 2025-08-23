@@ -7,6 +7,8 @@ from torchvision import transforms
 from tqdm import tqdm
 import multiprocessing as mp
 from functools import partial
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 
 class VideoFrameDataset(Dataset):
@@ -125,13 +127,13 @@ class VideoFrameDataset(Dataset):
         print(f"Preloading {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
         print(f"Preallocated tensor shape: {self.frames_tensor.shape}")
         
-        # Parallel processing setup
-        num_workers = min(mp.cpu_count(), 8)  # Limit workers to avoid too many file handles
-        batch_size = max(50, num_frames // (num_workers * 4))  # Adaptive batch size
+        # Use threading instead of multiprocessing for better compatibility
+        num_workers = min(4, mp.cpu_count())  # Use fewer threads for I/O bound work
+        batch_size = max(25, num_frames // (num_workers * 2))
         
-        print(f"Using {num_workers} workers with batch size {batch_size}")
+        print(f"Using {num_workers} threads with batch size {batch_size}")
         
-        # Split frame indices into batches for parallel processing
+        # Split frame indices into batches
         frame_batches = []
         for batch_start in range(0, num_frames, batch_size):
             batch_end = min(batch_start + batch_size, num_frames)
@@ -140,22 +142,28 @@ class VideoFrameDataset(Dataset):
         
         cap.release()  # Close main capture before spawning workers
         
-        # Process batches in parallel with fallback
+        # Process batches using ThreadPoolExecutor (more reliable than multiprocessing)
         frames_loaded = 0
         try:
-            with mp.Pool(num_workers) as pool:
-                with tqdm(total=num_frames, desc="Preloading frames (parallel)") as pbar:
-                    # Use imap for better progress tracking
-                    for batch_frames in pool.imap(VideoFrameDataset._load_and_process_frame_batch, frame_batches):
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                with tqdm(total=num_frames, desc="Preloading frames (threaded)") as pbar:
+                    # Submit all tasks
+                    futures = [executor.submit(VideoFrameDataset._load_and_process_frame_batch, batch) 
+                              for batch in frame_batches]
+                    
+                    # Collect results as they complete
+                    for future in futures:
+                        batch_frames = future.result()
                         if batch_frames:
-                            # Copy batch results into preallocated tensor
+                            # Convert numpy arrays to tensors and copy into preallocated tensor
                             batch_size_actual = len(batch_frames)
-                            for i, frame_tensor in enumerate(batch_frames):
+                            for i, frame_array in enumerate(batch_frames):
+                                frame_tensor = torch.from_numpy(frame_array)
                                 self.frames_tensor[frames_loaded + i] = frame_tensor
                             frames_loaded += batch_size_actual
                             pbar.update(batch_size_actual)
         except Exception as e:
-            print(f"Parallel processing failed ({e}), falling back to sequential processing...")
+            print(f"Threaded processing failed ({e}), falling back to sequential processing...")
             # Fallback to sequential processing
             cap = cv2.VideoCapture(self.video_path)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -222,20 +230,21 @@ class VideoFrameDataset(Dataset):
         
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         
+        # Return numpy arrays instead of tensors to avoid multiprocessing issues
         batch_frames = []
         for frame_idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             
             if ret:
-                # Process frame
+                # Process frame to numpy array
                 resized = cv2.resize(frame, target_size, interpolation=cv2.INTER_NEAREST)
                 rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
                 
-                # Convert to tensor and normalize
-                frame_tensor = torch.from_numpy(rgb_frame).permute(2, 0, 1).float()
-                frame_tensor = frame_tensor / 127.5 - 1.0  # Normalize to [-1, 1]
-                batch_frames.append(frame_tensor)
+                # Convert to CHW format and normalize, but keep as numpy
+                frame_array = rgb_frame.transpose(2, 0, 1).astype(np.float32)
+                frame_array = frame_array / 127.5 - 1.0  # Normalize to [-1, 1]
+                batch_frames.append(frame_array)
             else:
                 print(f"Warning: Could not read frame {frame_idx}")
         
