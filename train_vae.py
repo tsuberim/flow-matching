@@ -92,7 +92,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     
     # Create dataset and dataloader
     print("Loading video dataset...")
-    dataset = create_video_dataset(num_frames=num_frames)
+    dataset = create_video_dataset(num_frames=num_frames, sequence_length=1)
     
     dataloader = DataLoader(
         dataset=dataset,
@@ -415,7 +415,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=10,
+        batch_size=10 * 32,
         lr=1e-5,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
