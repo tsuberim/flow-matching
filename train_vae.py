@@ -87,6 +87,15 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
     
+    # Limit dataset to ensure exactly 1000 batches
+    target_batches = 1024
+    required_samples = target_batches * batch_size
+    
+    if len(dataset) > required_samples:
+        # Use subset to get exactly 1000 batches
+        indices = torch.randperm(len(dataset))[:required_samples]
+        dataset = torch.utils.data.Subset(dataset, indices)
+    
     num_workers = min(2, os.cpu_count())
     
     dataloader = DataLoader(
@@ -99,7 +108,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     print(f"Using {num_workers} DataLoader workers")
     print(f"Dataset size: {len(dataset)} frames")
-    print(f"Number of batches: {len(dataloader)}")
+    print(f"Number of batches: {len(dataloader)} (target: {target_batches})")
     
     # Create VAE model and move to device
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
@@ -269,9 +278,6 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     wandb.finish()
     
     return vae
-
-
-
 
 
 def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
