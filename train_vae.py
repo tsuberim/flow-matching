@@ -98,17 +98,23 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     """
     device = get_device()
     
-    # Single GPU training setup
+    # Adjust batch size based on available GPUs
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    effective_batch_size = batch_size * num_gpus
+    
     print(f"Device: {device}")
-    print(f"Batch size: {batch_size}")
-    effective_batch_size = batch_size * num_gpus_used
+    print(f"Number of GPUs: {num_gpus}")
+    print(f"Batch size per GPU: {batch_size}")
+    print(f"Effective batch size: {effective_batch_size}")
     
     # Initialize wandb
     wandb.init(
         project=project_name,
         config={
             "epochs": epochs,
-            "batch_size": batch_size,
+            "batch_size_per_gpu": batch_size,
+            "effective_batch_size": effective_batch_size,
+            "num_gpus": num_gpus,
             "learning_rate": lr,
             "beta": beta,
             "latent_dim": latent_dim,
@@ -121,8 +127,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     # Create dataset and dataloader
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
-    # Single GPU training - use moderate number of workers
-    num_workers = min(2, os.cpu_count())
+    # Adjust workers based on number of GPUs
+    num_workers = min(4 if num_gpus > 1 else 2, os.cpu_count())
     
     # Configure DataLoader based on worker count
     dataloader_kwargs = {
