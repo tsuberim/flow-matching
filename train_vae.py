@@ -144,8 +144,20 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             "num_gpus": 1
         }, allow_val_change=True)
     
-    # Set up optimizer and scheduler
-    optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
+    # Set up optimizer and scheduler with warmup for large models
+    if isinstance(vae, torch.nn.DataParallel):
+        model_size_check = vae.module.model_size
+    else:
+        model_size_check = vae.model_size
+    
+    if model_size_check >= 4:
+        # Use much smaller learning rate for very large models
+        warmup_lr = scaled_lr * 0.01  # Start with 1% of target LR
+        print(f"Large model detected, using warmup LR: {warmup_lr}")
+        optimizer = optim.Adam(vae.parameters(), lr=warmup_lr)
+    else:
+        optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
+    
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
     # Load checkpoint if exists (metadata already loaded above for wandb)
@@ -222,8 +234,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Backward pass
             loss.backward()
             
-            # Gradient clipping to prevent exploding gradients
-            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+            # Gradient clipping to prevent exploding gradients - much more aggressive for large model
+            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=0.1)
             
             # Monitor gradient norms for debugging
             if batch_idx % 100 == 0:
@@ -405,7 +417,7 @@ if __name__ == "__main__":
     trained_vae = train_vae(
         epochs=50,
         batch_size=10,
-        lr=1e-4,
+        lr=1e-5,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
         num_frames=1000,  # Use subset for faster training
