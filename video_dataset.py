@@ -9,20 +9,22 @@ from tqdm import tqdm
 
 class VideoFrameDataset(Dataset):
     """
-    PyTorch dataset for video frames
-    Extracts frames from 3/4 into video, resizes to target size with no antialiasing
+    PyTorch dataset for video frame sequences
+    Extracts sequences of frames from 3/4 into video, resizes to target size with no antialiasing
     """
     
-    def __init__(self, video_path, num_frames=10000, target_size=(320, 180)):
+    def __init__(self, video_path, num_frames=10000, target_size=(320, 180), sequence_length=32):
         """
         Args:
             video_path: Path to video file
             num_frames: Number of frames to extract from 3/4 into video
             target_size: Target resolution (width, height)
+            sequence_length: Length of each sequence returned (default: 32)
         """
         self.video_path = video_path
         self.num_frames = num_frames
         self.target_size = target_size
+        self.sequence_length = sequence_length
         
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -110,14 +112,20 @@ class VideoFrameDataset(Dataset):
         return tensor
     
     def __len__(self):
-        return self.num_frames
+        # Number of possible sequences (accounting for sequence length)
+        return max(0, self.num_frames - self.sequence_length + 1)
     
     def __getitem__(self, idx):
-        if idx >= self.num_frames:
-            raise IndexError(f"Index {idx} out of range for {self.num_frames} frames")
+        if idx >= len(self):
+            raise IndexError(f"Index {idx} out of range for {len(self)} sequences")
         
-        # Always use preloaded frames
-        return self.frames[idx]
+        # Return sequence of frames starting at idx
+        sequence = []
+        for i in range(self.sequence_length):
+            sequence.append(self.frames[idx + i])
+        
+        # Stack into tensor: (sequence_length, channels, height, width)
+        return torch.stack(sequence, dim=0)
 
 
 def find_video_file(video_dir='./videos'):
@@ -153,13 +161,13 @@ def create_video_dataset(video_path=None, **kwargs):
     return VideoFrameDataset(video_path, **kwargs)
 
 
-def preview_batch(dataset, batch_size=16):
+def preview_batch(dataset, batch_size=4):
     """
-    Create and display a preview of a sample batch
+    Create and display a preview of a sample batch of sequences
     
     Args:
         dataset: VideoFrameDataset instance
-        batch_size: Number of frames to show in preview
+        batch_size: Number of sequences to show in preview
     """
     import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
@@ -168,30 +176,28 @@ def preview_batch(dataset, batch_size=16):
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     batch = next(iter(loader))
     
-    print(f"Batch shape: {batch.shape}")
+    print(f"Batch shape: {batch.shape}")  # (batch_size, sequence_length, channels, height, width)
     print(f"Batch dtype: {batch.dtype}")
     print(f"Value range: [{batch.min():.3f}, {batch.max():.3f}]")
     
-    # Create visualization grid
-    grid_size = int(np.ceil(np.sqrt(batch_size)))
-    fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
-    axes = axes.flatten() if batch_size > 1 else [axes]
+    # Show first 8 frames from first sequence in batch
+    sequence = batch[0]  # Shape: (sequence_length, channels, height, width)
+    frames_to_show = min(8, sequence.shape[0])
     
-    for i in range(batch_size):
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    axes = axes.flatten()
+    
+    for i in range(frames_to_show):
         # Convert from (C,H,W) to (H,W,C) and denormalize
-        frame = batch[i].permute(1, 2, 0)
+        frame = sequence[i].permute(1, 2, 0)
         frame = (frame + 1) / 2  # [-1,1] -> [0,1]
         frame = torch.clamp(frame, 0, 1)
         
         axes[i].imshow(frame.numpy())
         axes[i].axis('off')
-        axes[i].set_title(f'Frame {i}', fontsize=8)
+        axes[i].set_title(f'Frame {i}', fontsize=10)
     
-    # Hide unused subplots
-    for i in range(batch_size, len(axes)):
-        axes[i].axis('off')
-    
-    plt.suptitle(f'Video Frame Batch Preview ({batch_size} frames)', fontsize=14)
+    plt.suptitle(f'Video Sequence Preview (First {frames_to_show} frames from sequence)', fontsize=14)
     plt.tight_layout()
     plt.show()
 

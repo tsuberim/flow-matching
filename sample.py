@@ -1,26 +1,44 @@
 import torch as t
 import torch.nn as nn
-from scipy.integrate import solve_ivp
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from model import create_latent_unet
+import cv2
+from scipy.integrate import solve_ivp
+from dit import create_dit_flow_model
 from vae import create_video_vae
+from video_dataset import create_video_dataset
 from utils import get_device
+from torch.utils.data import DataLoader
 
 
-def load_models(latent_dim=16, flow_model_path=None, vae_checkpoint_path=None):
-    """Load the trained flow model and VAE"""
+def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_path=None,
+                d_model=256, n_layers=4, n_heads=8):
+    """Load the trained DiT model and VAE"""
     device = get_device()
     
-    # Load flow model
-    if flow_model_path is None:
-        flow_model_path = f'latent_flow_model_dim{latent_dim}.pth'
+    # Load DiT model
+    if dit_model_path is None:
+        dit_model_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.pth'
     
-    flow_model = create_latent_unet(latent_dim=latent_dim).to(device)
-    flow_model.load_state_dict(t.load(flow_model_path, map_location=device))
-    flow_model.eval()
-    print(f"Loaded flow model from {flow_model_path}")
+    dit_model = create_dit_flow_model(
+        input_spatial_shape=(32, 18),
+        latent_dim=latent_dim,
+        seq_len=seq_len,
+        d_model=d_model,
+        n_layers=n_layers,
+        n_heads=n_heads,
+        dropout=0.1
+    ).to(device)
+    
+    try:
+        checkpoint = t.load(dit_model_path, map_location=device)
+        dit_model.load_state_dict(checkpoint['model_state_dict'])
+        dit_model.eval()
+        print(f"Loaded DiT model from {dit_model_path}")
+        print(f"Model config: {checkpoint.get('model_config', 'Not available')}")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"DiT model checkpoint not found: {dit_model_path}")
     
     # Load VAE
     if vae_checkpoint_path is None:
@@ -41,228 +59,520 @@ def load_models(latent_dim=16, flow_model_path=None, vae_checkpoint_path=None):
     except FileNotFoundError:
         raise FileNotFoundError(f"VAE checkpoint not found: {vae_checkpoint_path}")
     
-    return flow_model, vae, device
+    return dit_model, vae, device
 
 
-def vector_field(t_val, x_flat, model, device, shape):
+def sample_initial_frames(vae, device, batch_size=4, video_path=None):
     """
-    Vector field function for ODE solver
+    Sample random frames from video dataset and encode them with VAE
+    
+    Args:
+        vae: trained VAE model
+        device: torch device
+        batch_size: number of initial frames to sample
+        video_path: path to video file
+    
+    Returns:
+        encoded frames: [batch_size, latent_dim, height, width]
+    """
+    print(f"Sampling {batch_size} random frames from video...")
+    
+    # Create video dataset with individual frames
+    video_dataset = create_video_dataset(
+        video_path=video_path,
+        num_frames=1000,  # Use a subset for faster sampling
+        sequence_length=1  # Get individual frames
+    )
+    
+    # Sample random frames
+    indices = np.random.choice(len(video_dataset), size=batch_size, replace=False)
+    frames = []
+    
+    for idx in indices:
+        frame_seq = video_dataset[idx]  # Shape: [1, 3, 180, 320]
+        frame = frame_seq[0]  # Get the single frame: [3, 180, 320]
+        frames.append(frame)
+    
+    # Stack into batch
+    batch_frames = t.stack(frames).to(device)  # [batch_size, 3, 180, 320]
+    
+    print(f"Sampled frames shape: {batch_frames.shape}")
+    print(f"Frame range: [{batch_frames.min():.3f}, {batch_frames.max():.3f}]")
+    
+    # Encode with VAE
+    with t.no_grad():
+        mu, logvar = vae.encode(batch_frames)
+        # Use mean for deterministic encoding
+        encoded_frames = mu  # [batch_size, latent_dim, height, width]
+    
+    print(f"Encoded frames shape: {encoded_frames.shape}")
+    print(f"Encoded range: [{encoded_frames.min():.3f}, {encoded_frames.max():.3f}]")
+    
+    return encoded_frames
+
+
+def vector_field_sequence(t_val, x_flat, dit_model, current_sequence, device, shape):
+    """
+    Vector field function for ODE solver in sequence context
     
     Args:
         t_val: time value (scalar)
-        x_flat: flattened state vector
-        model: trained UNet model
+        x_flat: flattened state vector for next frame
+        dit_model: trained DiT model
+        current_sequence: current sequence context [batch_size, seq_len, latent_dim, height, width]
         device: torch device
-        shape: original tensor shape
+        shape: shape of the next frame [batch_size, latent_dim, height, width]
     
     Returns:
         velocity field as flattened numpy array
     """
-    # Reshape flat array back to original shape
-    x = x_flat.reshape(shape)
+    # Reshape flat array back to frame shape
+    next_frame = x_flat.reshape(shape)
     
     # Convert to torch tensor
-    x_tensor = t.from_numpy(x).float().to(device)
+    next_frame_tensor = t.from_numpy(next_frame).float().to(device)
+    
+    # Append to current sequence to create input for DiT
+    batch_size, seq_len = current_sequence.shape[:2]
+    input_sequence = t.cat([
+        current_sequence,
+        next_frame_tensor.unsqueeze(1)  # Add sequence dimension
+    ], dim=1)  # [batch_size, seq_len+1, latent_dim, height, width]
     
     with t.no_grad():
-        v = model(x_tensor)
+        # Get DiT prediction for the full sequence
+        predicted_sequence = dit_model(input_sequence)
+        
+        # Extract velocity for the next frame (last position)
+        v = predicted_sequence[:, -1]  # [batch_size, latent_dim, height, width]
     
     # Convert back to numpy and flatten
     return v.cpu().numpy().flatten()
 
 
-def sample_flow_matching(flow_model, device, num_samples=16, latent_dim=16):
+def generate_sequence_autoregressive(dit_model, initial_frames, target_length=64, window_size=32, device=None):
     """
-    Sample from flow-matching model using ODE solver in latent space
+    Generate sequences auto-regressively using DiT model with ODE solver and sliding window
     
     Args:
-        flow_model: trained latent UNet model
+        dit_model: trained DiT model
+        initial_frames: initial frame embeddings [batch_size, latent_dim, height, width]
+        target_length: total number of frames to generate
+        window_size: fixed window size for sequence context (default: 32)
         device: torch device
-        num_samples: number of samples to generate
-        latent_dim: latent space dimensions
     
     Returns:
-        generated latent samples as tensor [num_samples, latent_dim, 18, 32]
+        generated_sequences: [batch_size, target_length, latent_dim, height, width] - all generated frames
+        generation_steps: list of intermediate sequences for visualization
     """
-    # Start from noise in latent space
-    x0 = np.random.randn(num_samples, latent_dim, 18, 32)
-    shape = x0.shape
-    x0_flat = x0.flatten()
+    if device is None:
+        device = next(dit_model.parameters()).device
     
-    # Time span for integration (0 to 1)
-    t_span = (0, 1)
-    t_eval = np.array([0.0, 0.33, 0.67, 1.0])  # 4 points for visualization
+    batch_size, latent_dim, height, width = initial_frames.shape
+    print(f"Generating sequences auto-regressively with sliding window...")
+    print(f"Initial frames: {initial_frames.shape}")
+    print(f"Target length: {target_length}")
+    print(f"Window size: {window_size}")
     
-    print(f"Integrating ODE from t=0 to t=1 at 4 evaluation points...")
-    print(f"Latent space shape: {shape}")
+    # Start with initial frames - expand to sequence format
+    current_window = initial_frames.unsqueeze(1)  # [batch_size, 1, latent_dim, height, width]
     
-    # Solve ODE using Dormand-Prince method
-    solution = solve_ivp(
-        fun=lambda t, x: vector_field(t, x, flow_model, device, shape),
-        t_span=t_span,
-        y0=x0_flat,
-        method='DOP853',  # Dormand-Prince 8(5,3)
-        t_eval=t_eval,
-        rtol=1e-5,
-        atol=1e-8
-    )
+    # Store all generated frames (including initial)
+    all_generated_frames = [initial_frames.unsqueeze(1)]  # List of [batch_size, 1, latent_dim, height, width]
+    generation_steps = [current_window.clone()]
     
-    if not solution.success:
-        print(f"ODE solver failed: {solution.message}")
-        return None
+    for step in range(1, target_length):
+        print(f"Generating frame {step+1}/{target_length} using ODE solver...")
+        
+        # Start from noise for the next frame
+        next_frame_shape = (batch_size, latent_dim, height, width)
+        x0 = np.random.randn(*next_frame_shape)
+        x0_flat = x0.flatten()
+        
+        # Time span for integration (0 to 1)
+        t_span = (0, 1)
+        t_eval = np.array([1.0])  # Only need final result
+        
+        print(f"  Integrating ODE for frame {step+1}...")
+        print(f"  Using context window of size: {current_window.shape[1]}")
+        
+        # Solve ODE using current sequence window as context
+        solution = solve_ivp(
+            fun=lambda t, x: vector_field_sequence(
+                t, x, dit_model, current_window, device, next_frame_shape
+            ),
+            t_span=t_span,
+            y0=x0_flat,
+            method='DOP853',  # Dormand-Prince 8(5,3)
+            t_eval=t_eval,
+            rtol=1e-5,
+            atol=1e-8
+        )
+        
+        if not solution.success:
+            raise RuntimeError(f"ODE solver failed at step {step+1}: {solution.message}")
+        
+        print(f"  ✅ ODE solved successfully")
+        # Get final state and reshape
+        final_state = solution.y[:, -1]
+        next_frame_np = final_state.reshape(next_frame_shape)
+        next_frame = t.from_numpy(next_frame_np).float().to(device)
+        next_frame = next_frame.unsqueeze(1)  # Add sequence dimension
+        
+        # Store the generated frame
+        all_generated_frames.append(next_frame)
+        
+        # Update sliding window
+        current_window = t.cat([current_window, next_frame], dim=1)
+        
+        # If window exceeds window_size, remove the first frame (sliding window)
+        if current_window.shape[1] >= window_size:
+            current_window = current_window[:, 1:]  # Remove first frame, keep last window_size frames
+            print(f"  🪟 Sliding window: removed oldest frame, window size now: {current_window.shape[1]}")
+        
+        # Store for visualization (store current window state)
+        generation_steps.append(current_window.clone())
+        
+        # Print progress
+        print(f"  Generated frames so far: {len(all_generated_frames)}")
+        print(f"  Current window size: {current_window.shape[1]}")
+        print(f"  Next frame range: [{next_frame.min():.3f}, {next_frame.max():.3f}]")
     
-    # Get final state and reshapec
-    final_state = solution.y[:, -1]
-    samples = final_state.reshape(shape)
+    # Concatenate all generated frames into final sequence
+    final_sequence = t.cat(all_generated_frames, dim=1)  # [batch_size, target_length, latent_dim, height, width]
     
-    # Get intermediate states for visualization (4 time points)
-    intermediates = []
-    for i in range(4):  # t=0, 0.33, 0.67, 1.0
-        intermediate = solution.y[:, i].reshape(shape)
-        intermediates.append(t.from_numpy(intermediate).float())
-    
-    return t.from_numpy(samples).float(), intermediates
+    print(f"Generated sequence shape: {final_sequence.shape}")
+    print(f"Final window shape: {current_window.shape}")
+    return final_sequence, generation_steps
 
 
-def visualize_samples(samples, intermediates=None, save_path='generated_samples.png'):
-    """Visualize generated samples and intermediate states"""
-    samples = samples.clamp(-1, 1)  # Clamp to valid range
-    samples = (samples + 1) / 2  # Scale to [0, 1]
+def visualize_sequence_generation(sequences, generation_steps=None, save_path='generated_sequences.png'):
+    """
+    Visualize generated sequences and generation process
     
-    if intermediates is not None:
-        # Show 4 items with their intermediate states (4 time steps each)
-        num_items = 4
-        fig, axes = plt.subplots(num_items, 4, figsize=(12, 12))
+    Args:
+        sequences: [batch_size, seq_len, latent_dim, height, width] - full generated sequence
+        generation_steps: list of intermediate sliding windows
+        save_path: path to save visualization
+    """
+    print("Visualizing generated sequences...")
+    
+    batch_size, seq_len = sequences.shape[:2]
+    
+    # Show generation process for first sequence (sliding window states)
+    if generation_steps is not None:
+        fig, axes = plt.subplots(4, 8, figsize=(20, 10))
         
-        for item_idx in range(num_items):
-            if item_idx < len(samples):
-                for time_idx in range(4):
-                    img = intermediates[time_idx][item_idx, 0]
-                    img = img.clamp(-1, 1)
-                    img = (img + 1) / 2
-                    
-                    ax = axes[item_idx, time_idx]
-                    ax.imshow(img, cmap='gray')
-                    ax.axis('off')
-                    
-                    if item_idx == 0:
-                        time_labels = ['t=0 (noise)', 't=0.33', 't=0.67', 't=1 (data)']
-                        ax.set_title(time_labels[time_idx], fontsize=10)
-            else:
-                for time_idx in range(4):
-                    axes[item_idx, time_idx].axis('off')
+        # Show 4 different steps in generation (sliding window states)
+        step_indices = [0, len(generation_steps)//4, len(generation_steps)//2, -1]
+        step_labels = ['Initial', '25%', '50%', 'Final Window']
         
-        plt.suptitle('Flow Matching Generation Process', fontsize=14)
+        for step_idx, (step_pos, label) in enumerate(zip(step_indices, step_labels)):
+            step_window = generation_steps[step_pos][0]  # First batch item - current window
+            window_length = step_window.shape[0]
+            
+            # Show up to 8 frames from current window
+            for frame_idx in range(8):
+                ax = axes[step_idx, frame_idx]
+                
+                if frame_idx < window_length:
+                    # Visualize latent space (show first channel)
+                    frame = step_window[frame_idx, 0]  # [height, width]
+                    ax.imshow(frame.cpu().numpy(), cmap='viridis')
+                    ax.set_title(f'Win[{frame_idx+1}]', fontsize=8)
+                else:
+                    ax.text(0.5, 0.5, 'N/A', ha='center', va='center', 
+                           transform=ax.transAxes, fontsize=8)
+                
+                ax.axis('off')
+                
+                if frame_idx == 0:
+                    ax.set_ylabel(f'{label}\n(Win size: {window_length})', 
+                                fontsize=10, rotation=90, labelpad=10)
+        
+        plt.suptitle('Sliding Window Generation Process (Window States)', fontsize=14)
         plt.tight_layout()
         plt.savefig(save_path.replace('.png', '_process.png'), dpi=150, bbox_inches='tight')
         plt.show()
-        print(f"Process visualization saved to {save_path.replace('.png', '_process.png')}")
+        print(f"Generation process saved to {save_path.replace('.png', '_process.png')}")
     
-    # Also show final results grid
-    fig, axes = plt.subplots(4, 4, figsize=(8, 8))
-    for i, ax in enumerate(axes.flat):
-        if i < len(samples):
-            ax.imshow(samples[i, 0], cmap='gray')
-            ax.axis('off')
-        else:
-            ax.axis('off')
+    # Show final sequences (first and last frames of each batch)
+    fig, axes = plt.subplots(batch_size, 8, figsize=(20, 2*batch_size))
     
+    for batch_idx in range(batch_size):
+        # Show first 4 and last 4 frames to demonstrate full sequence
+        frame_indices = list(range(4)) + list(range(max(4, seq_len-4), seq_len))
+        frame_indices = frame_indices[:8]  # Ensure we don't exceed 8 frames
+        
+        for display_idx, frame_idx in enumerate(frame_indices):
+            ax = axes[batch_idx, display_idx] if batch_size > 1 else axes[display_idx]
+            
+            # Show first channel of latent representation
+            frame = sequences[batch_idx, frame_idx, 0]  # [height, width]
+            ax.imshow(frame.cpu().numpy(), cmap='viridis')
+            ax.axis('off')
+            
+            if batch_idx == 0:
+                if display_idx < 4:
+                    ax.set_title(f'Frame {frame_idx+1}', fontsize=8)
+                else:
+                    ax.set_title(f'Frame {frame_idx+1}', fontsize=8, color='red')
+            
+            if display_idx == 0:
+                ax.set_ylabel(f'Seq {batch_idx+1}', fontsize=10, rotation=90, labelpad=10)
+    
+    plt.suptitle(f'Generated Sequences - {seq_len} total frames (First 4 + Last 4 shown)', fontsize=14)
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.show()
-    print(f"Final samples saved to {save_path}")
+    print(f"Final sequences saved to {save_path}")
 
 
-def decode_and_visualize(latent_samples, vae, intermediates=None):
-    """Decode latent samples through VAE and visualize"""
-    device = next(vae.parameters()).device
+def decode_sequences_and_visualize(latent_sequences, vae, save_path='decoded_sequences.png'):
+    """
+    Decode latent sequences through VAE and visualize as video frames
     
-    # Decode final samples
+    Args:
+        latent_sequences: [batch_size, seq_len, latent_dim, height, width]
+        vae: trained VAE model
+        save_path: path to save visualization
+    
+    Returns:
+        decoded_sequences: [batch_size, seq_len, 3, height, width]
+    """
+    device = next(vae.parameters()).device
+    batch_size, seq_len = latent_sequences.shape[:2]
+    
+    print(f"Decoding {batch_size} sequences of length {seq_len}...")
+    
+    # Decode all frames
+    decoded_sequences = []
+    
     with t.no_grad():
-        # Handle both tensor and numpy array inputs
-        if isinstance(latent_samples, np.ndarray):
-            latent_tensor = t.from_numpy(latent_samples).float().to(device)
-        else:
-            latent_tensor = latent_samples.float().to(device)
-        
-        decoded_samples = vae.decode(latent_tensor)  # [N, 3, 180, 320]
-        decoded_samples = decoded_samples.cpu()
+        for batch_idx in range(batch_size):
+            print(f"Decoding sequence {batch_idx+1}/{batch_size}...")
+            
+            sequence_frames = []
+            for frame_idx in range(seq_len):
+                # Get single frame: [latent_dim, height, width]
+                latent_frame = latent_sequences[batch_idx, frame_idx].unsqueeze(0)  # [1, latent_dim, height, width]
+                
+                # Decode through VAE
+                decoded_frame = vae.decode(latent_frame.to(device))  # [1, 3, 180, 320]
+                decoded_frame = decoded_frame.cpu().squeeze(0)  # [3, 180, 320]
+                
+                sequence_frames.append(decoded_frame)
+            
+            # Stack frames into sequence
+            decoded_sequence = t.stack(sequence_frames)  # [seq_len, 3, 180, 320]
+            decoded_sequences.append(decoded_sequence)
+    
+    # Stack all sequences
+    decoded_sequences = t.stack(decoded_sequences)  # [batch_size, seq_len, 3, 180, 320]
     
     # Clamp and normalize for display
-    decoded_samples = t.clamp(decoded_samples, -1, 1)
-    decoded_samples = (decoded_samples + 1) / 2  # [-1,1] -> [0,1]
+    decoded_sequences = t.clamp(decoded_sequences, -1, 1)
+    decoded_sequences = (decoded_sequences + 1) / 2  # [-1,1] -> [0,1]
     
-    # Show intermediate process if available
-    if intermediates is not None:
-        num_items = 4
-        fig, axes = plt.subplots(num_items, 4, figsize=(16, 12))
-        
-        for item_idx in range(min(num_items, len(decoded_samples))):
-            for time_idx in range(4):
-                # Decode intermediate latent
-                intermediate_sample = intermediates[time_idx][item_idx:item_idx+1]
-                if isinstance(intermediate_sample, np.ndarray):
-                    intermediate_latent = t.from_numpy(intermediate_sample).float().to(device)
-                else:
-                    intermediate_latent = intermediate_sample.float().to(device)
-                with t.no_grad():
-                    intermediate_decoded = vae.decode(intermediate_latent)
-                    intermediate_decoded = t.clamp(intermediate_decoded, -1, 1)
-                    intermediate_decoded = (intermediate_decoded + 1) / 2
-                
-                # Display as RGB image
-                img = intermediate_decoded[0].permute(1, 2, 0)  # [C,H,W] -> [H,W,C]
-                
-                ax = axes[item_idx, time_idx]
-                ax.imshow(img.cpu().numpy())
-                ax.axis('off')
-                
-                if item_idx == 0:
-                    time_labels = ['t=0 (noise)', 't=0.33', 't=0.67', 't=1 (data)']
-                    ax.set_title(time_labels[time_idx], fontsize=10)
-        
-        plt.suptitle('Flow Matching Generation Process (Decoded)', fontsize=14)
-        plt.tight_layout()
-        plt.show()
+    print(f"Decoded sequences shape: {decoded_sequences.shape}")
     
-    # Show final results grid
-    fig, axes = plt.subplots(4, 4, figsize=(16, 12))
-    for i, ax in enumerate(axes.flat):
-        if i < len(decoded_samples):
-            # Convert to displayable format [H, W, C]
-            img = decoded_samples[i].permute(1, 2, 0)
-            ax.imshow(img.numpy())
+    # Visualize sequences
+    fig, axes = plt.subplots(batch_size, min(8, seq_len), figsize=(min(8, seq_len)*3, batch_size*3))
+    
+    for batch_idx in range(batch_size):
+        for frame_idx in range(min(8, seq_len)):
+            ax = axes[batch_idx, frame_idx] if batch_size > 1 else axes[frame_idx]
+            
+            # Get frame and convert to displayable format
+            frame = decoded_sequences[batch_idx, frame_idx]  # [3, 180, 320]
+            frame_display = frame.permute(1, 2, 0)  # [180, 320, 3]
+            
+            ax.imshow(frame_display.numpy())
             ax.axis('off')
-            ax.set_title(f'Sample {i+1}', fontsize=8)
-        else:
-            ax.axis('off')
+            
+            if batch_idx == 0:
+                ax.set_title(f'Frame {frame_idx+1}', fontsize=10)
+            
+            if frame_idx == 0:
+                ax.set_ylabel(f'Sequence {batch_idx+1}', fontsize=12, rotation=90, labelpad=15)
     
-    plt.suptitle('Generated Video Frames', fontsize=14)
+    plt.suptitle(f'Decoded Video Sequences - {seq_len} frames each', fontsize=14)
     plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.show()
+    print(f"Decoded sequences saved to {save_path}")
     
-    return decoded_samples
+    return decoded_sequences
+
+
+def save_sequences_as_videos(decoded_sequences, output_dir='./output', fps=8):
+    """
+    Save decoded sequences as MP4 videos
+    
+    Args:
+        decoded_sequences: [batch_size, seq_len, 3, height, width] in range [0, 1]
+        output_dir: directory to save videos
+        fps: frames per second for the videos
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    batch_size, seq_len, channels, height, width = decoded_sequences.shape
+    print(f"Saving {batch_size} sequences as MP4 videos...")
+    print(f"Output directory: {output_dir}")
+    print(f"Video specs: {seq_len} frames, {height}x{width}, {fps} FPS")
+    
+    for batch_idx in range(batch_size):
+        video_path = os.path.join(output_dir, f'generated_sequence_{batch_idx+1}.mp4')
+        
+        # Use H.264 codec for better compatibility
+        fourcc = cv2.VideoWriter_fourcc(*'H264')
+        video_writer = cv2.VideoWriter(video_path, fourcc, float(fps), (width, height), True)
+        
+        # Check if video writer was successfully initialized
+        if not video_writer.isOpened():
+            print(f"  ❌ Failed to open video writer for {video_path}")
+            print(f"  🔄 Trying alternative codec...")
+            # Try alternative codec
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            video_path_alt = video_path.replace('.mp4', '.avi')
+            video_writer = cv2.VideoWriter(video_path_alt, fourcc, float(fps), (width, height), True)
+            video_path = video_path_alt
+        
+        if not video_writer.isOpened():
+            print(f"  ❌ Failed to initialize video writer for sequence {batch_idx+1}")
+            continue
+        
+        print(f"Saving sequence {batch_idx+1}/{batch_size} to {video_path}...")
+        
+        for frame_idx in range(seq_len):
+            # Get frame: [3, height, width] in range [0, 1]
+            frame = decoded_sequences[batch_idx, frame_idx]
+            
+            # Convert to numpy and scale to [0, 255]
+            frame_np = frame.permute(1, 2, 0).numpy()  # [height, width, 3]
+            
+            # Clamp values to ensure they're in [0, 1] range
+            frame_np = np.clip(frame_np, 0, 1)
+            frame_np = (frame_np * 255).astype(np.uint8)
+            
+            # Convert RGB to BGR for OpenCV
+            frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
+            
+            # Verify frame dimensions
+            if frame_bgr.shape[:2] != (height, width):
+                print(f"  ⚠️  Frame {frame_idx} dimension mismatch: {frame_bgr.shape} vs expected ({height}, {width})")
+                continue
+            
+            # Write frame to video
+            success = video_writer.write(frame_bgr)
+            if not success:
+                print(f"  ⚠️  Failed to write frame {frame_idx}")
+        
+        video_writer.release()
+        
+        # Verify the file was created and has reasonable size
+        if os.path.exists(video_path):
+            file_size = os.path.getsize(video_path)
+            if file_size > 1000:  # At least 1KB
+                print(f"  ✅ Saved: {video_path} ({file_size:,} bytes)")
+            else:
+                print(f"  ⚠️  Video file seems too small: {video_path} ({file_size} bytes)")
+        else:
+            print(f"  ❌ Video file not created: {video_path}")
+    
+    print(f"\n🎬 All {batch_size} videos saved to {output_dir}/")
+    
+    # Create a summary file
+    summary_path = os.path.join(output_dir, 'generation_info.txt')
+    with open(summary_path, 'w') as f:
+        f.write("Generated Video Sequences Summary\n")
+        f.write("=" * 40 + "\n")
+        f.write(f"Number of sequences: {batch_size}\n")
+        f.write(f"Frames per sequence: {seq_len}\n")
+        f.write(f"Resolution: {height}x{width}\n")
+        f.write(f"Frame rate: {fps} FPS\n")
+        f.write(f"Duration per video: {seq_len/fps:.1f} seconds\n")
+        f.write("\nGenerated files:\n")
+        for i in range(batch_size):
+            f.write(f"- generated_sequence_{i+1}.mp4\n")
+    
+    print(f"📋 Generation summary saved to {summary_path}")
 
 
 def main():
-    """Main sampling function"""
+    """Main auto-regressive sequence generation function"""
+    # Configuration
     latent_dim = 16
+    seq_len = 32
+    batch_size = 4
+    target_length = 64
+    
+    print("🚀 Auto-regressive Video Sequence Generation")
+    print("=" * 50)
     
     print("Loading trained models...")
-    flow_model, vae, device = load_models(latent_dim=latent_dim)
+    dit_model, vae, device = load_models(
+        latent_dim=latent_dim,
+        seq_len=seq_len,
+        d_model=256,
+        n_layers=4,
+        n_heads=8
+    )
     
-    print("Generating samples in latent space...")
-    result = sample_flow_matching(flow_model, device, num_samples=16, latent_dim=latent_dim)
+    print("\n1. Sampling initial frames from video...")
+    initial_frames = sample_initial_frames(
+        vae=vae,
+        device=device,
+        batch_size=batch_size,
+        video_path=None  # Uses auto-detected video
+    )
+    print(f"Initial frames shape: {initial_frames.shape}")
     
-    if result is not None:
-        latent_samples, intermediates = result
-        print(f"Generated latent samples shape: {latent_samples.shape}")
-        
-        print("Decoding through VAE and visualizing...")
-        decoded_samples = decode_and_visualize(latent_samples, vae, intermediates)
-        print(f"Decoded samples shape: {decoded_samples.shape}")
-    else:
-        print("Sampling failed!")
+    print(f"\n2. Generating sequences auto-regressively...")
+    generated_sequences, generation_steps = generate_sequence_autoregressive(
+        dit_model=dit_model,
+        initial_frames=initial_frames,
+        target_length=target_length,
+        window_size=seq_len,  # Use the model's sequence length as window size
+        device=device
+    )
+    
+    print(f"\n3. Visualizing generation process...")
+    visualize_sequence_generation(
+        sequences=generated_sequences,
+        generation_steps=generation_steps,
+        save_path='autoregressive_sequences.png'
+    )
+    
+    print(f"\n4. Decoding sequences through VAE...")
+    decoded_sequences = decode_sequences_and_visualize(
+        latent_sequences=generated_sequences,
+        vae=vae,
+        save_path='decoded_video_sequences.png'
+    )
+    
+    print(f"\n5. Saving sequences as MP4 videos...")
+    save_sequences_as_videos(
+        decoded_sequences=decoded_sequences,
+        output_dir='./output',
+        fps=8  # Slower playback for better viewing
+    )
+    
+    print(f"\n✅ Generation complete!")
+    print(f"   Generated {batch_size} sequences of length {target_length}")
+    print(f"   Latent sequences shape: {generated_sequences.shape}")
+    print(f"   Decoded sequences shape: {decoded_sequences.shape}")
+    print(f"   Saved outputs:")
+    print(f"   📊 Visualizations:")
+    print(f"      - autoregressive_sequences.png")
+    print(f"      - autoregressive_sequences_process.png") 
+    print(f"      - decoded_video_sequences.png")
+    print(f"   🎬 Videos:")
+    print(f"      - ./output/generated_sequence_1.mp4")
+    print(f"      - ./output/generated_sequence_2.mp4")
+    print(f"      - ./output/generated_sequence_3.mp4")
+    print(f"      - ./output/generated_sequence_4.mp4")
+    print(f"      - ./output/generation_info.txt")
 
 
 if __name__ == "__main__":

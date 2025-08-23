@@ -88,11 +88,12 @@ class EmbeddingDataset(Dataset):
     
     def _create_embeddings(self):
         """Create embeddings from video frames using VAE"""
-        # Load video dataset
+        # Load video dataset (single frames, not sequences)
         print("Loading video dataset...")
         video_dataset = create_video_dataset(
             video_path=self.video_path, 
-            num_frames=self.num_frames
+            num_frames=self.num_frames,
+            sequence_length=1  # Get individual frames for VAE encoding
         )
         
         # Create dataloader
@@ -111,14 +112,17 @@ class EmbeddingDataset(Dataset):
         
         print(f"Embedding {len(video_dataset)} frames using VAE...")
         with torch.no_grad():
-            for batch_frames in tqdm(dataloader, desc="Embedding frames"):
-                batch_frames = batch_frames.to(device)
+            for batch_sequences in tqdm(dataloader, desc="Embedding frames"):
+                batch_sequences = batch_sequences.to(device)
+                
+                # batch_sequences shape: [batch_size, 1, channels, height, width]
+                # Squeeze out the sequence dimension to get [batch_size, channels, height, width]
+                batch_frames = batch_sequences.squeeze(1)
                 
                 # Encode to latent space (get mu, ignore logvar for deterministic encoding)
                 mu, logvar = vae.encode(batch_frames)
                 
                 # Use mean (mu) for deterministic embeddings
-                # Alternatively: could use reparameterized samples
                 batch_embeddings = mu.cpu()
                 
                 embeddings.append(batch_embeddings)
@@ -132,11 +136,16 @@ class EmbeddingDataset(Dataset):
         return all_embeddings
     
     def __len__(self):
-        return len(self.embeddings)
+        # Return number of possible sequences of length 32
+        return max(0, len(self.embeddings) - 31)
     
     def __getitem__(self, idx):
-        """Get embedding at index"""
-        return self.embeddings[idx]
+        """Get sequence of 32 consecutive embeddings starting at index"""
+        if idx < 0 or idx >= len(self):
+            raise IndexError("Index out of range")
+        
+        # Return sequence of 32 consecutive embeddings
+        return self.embeddings[idx:idx + 32]
     
     def get_embedding_info(self):
         """Get information about the embeddings"""
@@ -185,7 +194,7 @@ def test_embedding_dataset():
     try:
         # Create dataset
         dataset = create_embedding_dataset(
-            num_frames=1000,  # Small test
+            num_frames=10000,  # Small test
             latent_dim=16,
             batch_size=16
         )
@@ -197,7 +206,7 @@ def test_embedding_dataset():
             print(f"  {key}: {value}")
         
         # Test dataloader
-        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+        dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
         
         print(f"\nDataLoader test:")
         print(f"  Dataset length: {len(dataset)}")
@@ -205,9 +214,13 @@ def test_embedding_dataset():
         
         # Get first batch
         batch = next(iter(dataloader))
-        print(f"  Batch shape: {batch.shape}")
+        print(f"  Batch shape: {batch.shape}")  # Should be [batch_size, 32, latent_dim]
         print(f"  Batch dtype: {batch.dtype}")
         print(f"  Batch range: [{batch.min():.3f}, {batch.max():.3f}]")
+        
+        # Test individual sequence
+        sequence = dataset[0]
+        print(f"  Single sequence shape: {sequence.shape}")  # Should be [32, latent_dim]
         
         print("\n✅ Embedding dataset test passed!")
         return dataset
