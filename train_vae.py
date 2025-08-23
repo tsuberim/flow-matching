@@ -1,12 +1,7 @@
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.distributed as dist
-import torch.multiprocessing as mp
 from tqdm import tqdm
 import numpy as np
 import wandb
@@ -18,45 +13,7 @@ from video_dataset import create_video_dataset
 from utils import get_device
 
 
-def setup_ddp(rank, world_size, backend='nccl'):
-    """
-    Setup Distributed Data Parallel
-    
-    Args:
-        rank: process rank
-        world_size: total number of processes
-        backend: communication backend
-    """
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    
-    # Initialize process group
-    dist.init_process_group(backend, rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
 
-
-def cleanup_ddp():
-    """Cleanup DDP process group"""
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def setup_model_ddp(model, rank):
-    """
-    Setup model for DDP
-    
-    Args:
-        model: PyTorch model
-        rank: process rank
-    
-    Returns:
-        model: DDP wrapped model
-        device: device for this rank
-    """
-    device = torch.device(f'cuda:{rank}')
-    model = model.to(device)
-    model = DDP(model, device_ids=[rank])
-    return model, device
 
 
 def log_reconstruction_to_wandb(original, reconstruction, epoch):
@@ -91,16 +48,14 @@ def log_reconstruction_to_wandb(original, reconstruction, epoch):
     })
 
 
-def train_vae_ddp(rank, world_size, epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8, 
-                  num_frames=None, visualize_every=10, model_size=1, project_name="video-vae"):
+def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8, 
+              num_frames=None, visualize_every=10, model_size=1, project_name="video-vae"):
     """
-    Train the VAE using Distributed Data Parallel
+    Train the VAE on video frames
     
     Args:
-        rank: process rank
-        world_size: total number of processes
         epochs: number of training epochs
-        batch_size: batch size per GPU
+        batch_size: batch size for training
         lr: learning rate
         beta: beta parameter for beta-VAE (KL weight)
         latent_dim: latent space dimensionality
@@ -109,153 +64,120 @@ def train_vae_ddp(rank, world_size, epochs=100, batch_size=32, lr=1e-3, beta=1.0
         model_size: model size multiplier for channels
         project_name: wandb project name
     """
+    device = get_device()
+    print(f"Using device: {device}")
+    print(f"Batch size: {batch_size}")
+    
+    # Initialize wandb
+    wandb.init(
+        project=project_name,
+        config={
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "beta": beta,
+            "latent_dim": latent_dim,
+            "num_frames": num_frames,
+            "model_size": model_size,
+            "device": str(device)
+        }
+    )
+    
+    # Create dataset and dataloader
+    print("Loading video dataset...")
+    dataset = create_video_dataset(num_frames=num_frames)
+    
+    num_workers = min(2, os.cpu_count())
+    
+    dataloader = DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
+    
+    print(f"Using {num_workers} DataLoader workers")
+    print(f"Dataset size: {len(dataset)} frames")
+    print(f"Number of batches: {len(dataloader)}")
+    
+    # Create VAE model and move to device
+    vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
+    vae = vae.to(device)
+    
+    # Set up optimizer and scheduler
+    optimizer = optim.Adam(vae.parameters(), lr=lr)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+    
+    # Load checkpoint if exists
+    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
+    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
+    start_epoch = 0
+    best_loss = float('inf')
+    
     try:
-        # Setup DDP
-        setup_ddp(rank, world_size)
-        device = torch.device(f'cuda:{rank}')
+        # Load model weights from safetensors
+        model_state = load_file(checkpoint_path)
         
-        # Only print from rank 0
-        if rank == 0:
-            print(f"Training with {world_size} GPUs using DDP")
-            print(f"Batch size per GPU: {batch_size}")
-            print(f"Effective batch size: {batch_size * world_size}")
+        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
+        if any(key.startswith('module.') for key in model_state.keys()):
+            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
         
-        effective_batch_size = batch_size
+        vae.load_state_dict(model_state)
+        
+        # Load training metadata from regular torch file
+        metadata = torch.load(metadata_path, map_location=device)
+        optimizer.load_state_dict(metadata['optimizer_state_dict'])
+        if 'scheduler_state_dict' in metadata:
+            scheduler.load_state_dict(metadata['scheduler_state_dict'])
+        start_epoch = metadata['epoch'] + 1
+        best_loss = metadata.get('best_loss', float('inf'))
+        print(f"Loaded checkpoint from epoch {metadata['epoch']}")
+        print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
+    except (FileNotFoundError, KeyError) as e:
+        print(f"No checkpoint found, starting from scratch")
     
-        # Initialize wandb only on rank 0
-        if rank == 0:
-            wandb.init(
-                project=project_name,
-                config={
-                    "epochs": epochs,
-                    "batch_size_per_gpu": batch_size,
-                    "world_size": world_size,
-                    "effective_batch_size": batch_size * world_size,
-                    "learning_rate": lr,
-                    "beta": beta,
-                    "latent_dim": latent_dim,
-                    "num_frames": num_frames,
-                    "model_size": model_size,
-                    "device": str(device)
-                }
-            )
+    # Training loop
+    print(f"Starting VAE training for {epochs} epochs (from epoch {start_epoch})...")
     
-        # Create dataset and dataloader with DistributedSampler
-        if rank == 0:
-            print("Loading video dataset...")
-        dataset = create_video_dataset(num_frames=num_frames)
+    for epoch in range(start_epoch, epochs):
+        vae.train()
+        total_loss = 0
+        total_recon_loss = 0
+        total_kl_loss = 0
+        total_sim_loss = 0
+        total_diff_loss = 0
         
-        # Use DistributedSampler for proper data distribution
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}')
         
-        num_workers = min(2, os.cpu_count() // world_size)  # Divide workers among processes
-        
-        dataloader = DataLoader(
-            dataset=dataset,
-            batch_size=effective_batch_size,
-            sampler=sampler,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available()
-        )
-        
-        if rank == 0:
-            print(f"Using {num_workers} DataLoader workers per process")
-            print(f"Dataset size: {len(dataset)} frames")
-            print(f"Number of batches per process: {len(dataloader)}")
-    
-        # Create VAE model and setup for DDP
-        vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-        vae, device = setup_model_ddp(vae, rank)
-        
-        # Scale learning rate by world size
-        scaled_lr = lr * world_size
-        if rank == 0:
-            print(f"Scaling learning rate: {lr} -> {scaled_lr} (x{world_size})")
-        
-        optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-        
-        # Load checkpoint if exists
-        checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
-        metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
-        start_epoch = 0
-        best_loss = float('inf')
-        
-        try:
-            # Load model weights from safetensors
-            model_state = load_file(checkpoint_path)
+        for batch_idx, frames in enumerate(pbar):
+            frames = frames.to(device)
             
-            # Remove 'module.' prefix if loading DataParallel weights to single GPU model
-            if any(key.startswith('module.') for key in model_state.keys()):
-                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            # Zero gradients
+            optimizer.zero_grad()
             
-            vae.load_state_dict(model_state)
+            # Compute loss
+            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
             
-            # Load training metadata from regular torch file
-            metadata = torch.load(metadata_path, map_location=device)
-            optimizer.load_state_dict(metadata['optimizer_state_dict'])
-            if 'scheduler_state_dict' in metadata:
-                scheduler.load_state_dict(metadata['scheduler_state_dict'])
-            start_epoch = metadata['epoch'] + 1
-            best_loss = metadata.get('best_loss', float('inf'))
-            if rank == 0:
-                print(f"Loaded checkpoint from epoch {metadata['epoch']}")
-                print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
-        except (FileNotFoundError, KeyError) as e:
-            if rank == 0:
-                print(f"No checkpoint found, starting from scratch")
-        
-        # Training loop
-        if rank == 0:
-            print(f"Starting VAE training for {epochs} epochs (from epoch {start_epoch})...")
-        
-        for epoch in range(start_epoch, epochs):
-            # Set epoch for distributed sampler
-            sampler.set_epoch(epoch)
+            # Backward pass
+            loss.backward()
+            optimizer.step()
             
-            vae.train()
-            total_loss = 0
-            total_recon_loss = 0
-            total_kl_loss = 0
-            total_sim_loss = 0
-            total_diff_loss = 0
+            # Accumulate losses
+            total_loss += loss.item()
+            total_recon_loss += recon_loss.item()
+            total_kl_loss += kl_loss.item()
+            total_sim_loss += sim_loss.item()
+            total_diff_loss += diff_loss.item()
             
-            # Only show progress bar on rank 0
-            if rank == 0:
-                pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}')
-                iterator = pbar
-            else:
-                iterator = dataloader
-            
-            for batch_idx, frames in enumerate(iterator):
-                frames = frames.to(device)
-            
-                            # Zero gradients
-                optimizer.zero_grad()
-                
-                # Compute loss
-                loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                # Accumulate losses
-                total_loss += loss.item()
-                total_recon_loss += recon_loss.item()
-                total_kl_loss += kl_loss.item()
-                total_sim_loss += sim_loss.item()
-                total_diff_loss += diff_loss.item()
-                
-                # Update progress bar (only on rank 0)
-                if rank == 0:
-                    pbar.set_postfix({
-                        'Loss': f'{loss.item():.4f}',
-                        'Recon': f'{recon_loss.item():.4f}',
-                        'KL': f'{kl_loss.item():.4f}',
-                        'Sim': f'{sim_loss.item():.4f}',
-                        'Diff': f'{diff_loss.item():.4f}'
-                    })
+            # Update progress bar
+            pbar.set_postfix({
+                'Loss': f'{loss.item():.4f}',
+                'Recon': f'{recon_loss.item():.4f}',
+                'KL': f'{kl_loss.item():.4f}',
+                'Sim': f'{sim_loss.item():.4f}',
+                'Diff': f'{diff_loss.item():.4f}'
+            })
             
             # Log metrics to wandb every few batches
             if batch_idx % 10 == 0:
@@ -337,44 +259,19 @@ def train_vae_ddp(rank, world_size, epochs=100, batch_size=32, lr=1e-3, beta=1.0
         torch.save(metadata, metadata_path)
         print(f"Checkpoint saved at epoch {epoch+1} (loss: {avg_loss:.4f}, best: {best_loss:.4f})")
     
-        # Final model save using safetensors (only on rank 0)
-        if rank == 0:
-            final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
-            final_model_state = vae.module.state_dict() if hasattr(vae, 'module') else vae.state_dict()
-            save_file(final_model_state, final_model_path)
-            print(f"Final model saved as '{final_model_path}'")
-            
-            # Finish wandb run
-            wandb.finish()
+    # Final model save using safetensors
+    final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
+    final_model_state = vae.state_dict()
+    save_file(final_model_state, final_model_path)
+    print(f"Final model saved as '{final_model_path}'")
     
-        return vae
+    # Finish wandb run
+    wandb.finish()
     
-    except Exception as e:
-        print(f"Error in rank {rank}: {e}")
-        raise e
-    finally:
-        cleanup_ddp()
+    return vae
 
 
-def train_vae_wrapper(epochs=50, batch_size=2, lr=1e-3, beta=1e-5, latent_dim=16, 
-                     num_frames=None, visualize_every=10, model_size=2, project_name="video-vae"):
-    """
-    Wrapper function to launch DDP training
-    """
-    world_size = torch.cuda.device_count()
-    if world_size < 2:
-        print("Warning: Only 1 GPU available, falling back to single GPU training")
-        # For single GPU, we can still use the DDP function with world_size=1
-        world_size = 1
-    
-    print(f"Launching DDP training with {world_size} processes")
-    
-    mp.spawn(
-        train_vae_ddp,
-        args=(world_size, epochs, batch_size, lr, beta, latent_dim, num_frames, visualize_every, model_size, project_name),
-        nprocs=world_size,
-        join=True
-    )
+
 
 
 def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
@@ -390,7 +287,7 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     
     # Load trained VAE
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, _ = setup_gpu(vae, device)
+    vae = vae.to(device)
     
     try:
         model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
@@ -426,10 +323,10 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
 
 
 if __name__ == "__main__":
-    # Train VAE using DDP
-    train_vae_wrapper(
+    # Train VAE
+    trained_vae = train_vae(
         epochs=50,
-        batch_size=2,  # Batch size per GPU
+        batch_size=2,
         lr=1e-3,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
