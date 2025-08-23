@@ -30,10 +30,17 @@ def setup_gpu(model, device):
     if num_gpus > 1:
         print(f"Using {num_gpus} GPUs with DataParallel")
         model = model.to(device)
+        
+        # Disable NCCL optimizations that cause issues
+        import os
+        os.environ['NCCL_P2P_DISABLE'] = '1'
+        os.environ['NCCL_IB_DISABLE'] = '1'
+        
         model = torch.nn.DataParallel(model)
     else:
         print(f"Using single GPU: {device}")
         model = model.to(device)
+        torch.backends.cudnn.benchmark = True
     
     torch.cuda.empty_cache()
     return model, num_gpus
