@@ -153,39 +153,36 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     start_epoch = 0
     best_loss = float('inf')
     
-    if wandb_run_id is not None:
-        try:
-            # Load model weights from safetensors
-            model_state = load_file(checkpoint_path)
-            
-            # Handle DataParallel loading properly
-            is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
-            is_current_dataparallel = isinstance(vae, torch.nn.DataParallel)
-            
-            if is_dataparallel_checkpoint and not is_current_dataparallel:
-                # Loading DataParallel weights into single model
-                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
-            elif not is_dataparallel_checkpoint and is_current_dataparallel:
-                # Loading single model weights into DataParallel
-                model_state = {f'module.{k}': v for k, v in model_state.items()}
-            
-            vae.load_state_dict(model_state)
-            
-            # Use already loaded metadata
-            optimizer.load_state_dict(metadata['optimizer_state_dict'])
-            if 'scheduler_state_dict' in metadata:
-                scheduler.load_state_dict(metadata['scheduler_state_dict'])
-            start_epoch = metadata['epoch'] + 1
-            best_loss = metadata.get('best_loss', float('inf'))
-            print(f"Loaded checkpoint from epoch {metadata['epoch']}")
-            print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
-        except (FileNotFoundError, KeyError) as e:
-            print(f"Checkpoint metadata found but model loading failed: {e}")
-        except Exception as e:
-            print(f"Error loading checkpoint: {e}")
-            print("Starting from scratch instead...")
-    else:
-        print(f"No checkpoint found, starting from scratch")
+    try:
+        # Load model weights from safetensors
+        model_state = load_file(checkpoint_path)
+        
+        # Handle DataParallel loading properly
+        is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
+        is_current_dataparallel = isinstance(vae, torch.nn.DataParallel)
+        
+        if is_dataparallel_checkpoint and not is_current_dataparallel:
+            # Loading DataParallel weights into single model
+            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+        elif not is_dataparallel_checkpoint and is_current_dataparallel:
+            # Loading single model weights into DataParallel
+            model_state = {f'module.{k}': v for k, v in model_state.items()}
+        
+        vae.load_state_dict(model_state)
+        
+        # Use already loaded metadata
+        optimizer.load_state_dict(metadata['optimizer_state_dict'])
+        if 'scheduler_state_dict' in metadata:
+            scheduler.load_state_dict(metadata['scheduler_state_dict'])
+        start_epoch = metadata['epoch'] + 1
+        best_loss = metadata.get('best_loss', float('inf'))
+        print(f"Loaded checkpoint from epoch {metadata['epoch']}")
+        print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
+    except (FileNotFoundError, KeyError) as e:
+        print(f"Checkpoint metadata found but model loading failed: {e}")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        print("Starting from scratch instead...")
     
     # Training loop
     print(f"Starting VAE training for {epochs} epochs (from epoch {start_epoch})...")
