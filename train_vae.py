@@ -78,7 +78,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print(f"Number of batches: {len(dataloader)}")
     
     # Create VAE model
-    vae = create_video_vae(latent_dim=latent_dim).to(device)
+    vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
     optimizer = optim.Adam(vae.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
@@ -108,6 +108,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         total_loss = 0
         total_recon_loss = 0
         total_kl_loss = 0
+        total_sim_loss = 0
+        total_diff_loss = 0
         
         # Training loop with progress bar
         pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}')
@@ -118,11 +120,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Zero gradients
             optimizer.zero_grad()
             
-            # Forward pass
-            reconstruction, mu, logvar = vae(frames)
-            
             # Compute loss
-            loss, recon_loss, kl_loss = vae_loss(reconstruction, frames, mu, logvar, beta=beta)
+            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
             
             # Backward pass
             loss.backward()
@@ -132,24 +131,31 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_kl_loss += kl_loss.item()
-            
+            total_sim_loss += sim_loss.item()
+            total_diff_loss += diff_loss.item()
+
             # Update progress bar
             pbar.set_postfix({
                 'Loss': f'{loss.item():.4f}',
                 'Recon': f'{recon_loss.item():.4f}',
-                'KL': f'{kl_loss.item():.4f}'
+                'KL': f'{kl_loss.item():.4f}',
+                'Sim': f'{sim_loss.item():.4f}',
+                'Diff': f'{diff_loss.item():.4f}'
             })
         
         # Calculate average losses
         avg_loss = total_loss / len(dataloader)
         avg_recon_loss = total_recon_loss / len(dataloader)
         avg_kl_loss = total_kl_loss / len(dataloader)
-        
+        avg_sim_loss = total_sim_loss / len(dataloader)
+        avg_diff_loss = total_diff_loss / len(dataloader)
+            
         print(f'Epoch {epoch+1}/{epochs}:')
         print(f'  Total Loss: {avg_loss:.4f}')
         print(f'  Recon Loss: {avg_recon_loss:.4f}')
         print(f'  KL Loss: {avg_kl_loss:.4f}')
-        
+        print(f'  Sim Loss: {avg_sim_loss:.4f}')
+        print(f'  Diff Loss: {avg_diff_loss:.4f}')
         # Step scheduler
         scheduler.step(avg_loss)
         
@@ -162,10 +168,16 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         with torch.no_grad():
             # Get a batch for visualization
             sample_batch = next(iter(dataloader)).to(device)
-            sample_recon, _, _ = vae(sample_batch)
+            # Reshape for VAE: [B, T, C, H, W] -> [B*T, C, H, W]
+            b, t, c, h, w = sample_batch.shape
+            sample_flat = sample_batch.view(b * t, c, h, w)
+            sample_recon, _, _ = vae(sample_flat)
+            # Reshape back: [B*T, C, H, W] -> [B, T, C, H, W]
+            sample_recon = sample_recon.view(b, t, c, h, w)
             
+            # Take first frame from each sequence for visualization
             visualize_reconstruction(
-                sample_batch, sample_recon, epoch + 1
+                sample_batch[:, 0], sample_recon[:, 0], epoch + 1
             )
         vae.train()
         
@@ -202,7 +214,7 @@ def test_vae_sampling(latent_dim=8, num_samples=16):
     device = get_device()
     
     # Load trained VAE
-    vae = create_video_vae(latent_dim=latent_dim).to(device)
+    vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
     
     try:
         vae.load_state_dict(torch.load(f'vae_final_dim{latent_dim}.pth', map_location=device))
@@ -245,11 +257,11 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=128 + 128//2,  # Adjust based on GPU memory
+        batch_size=6,  # Adjust based on GPU memory
         lr=1e-3,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
-        num_frames=10000,  # Use subset for faster training
+        num_frames=1000,  # Use subset for faster training
         visualize_every=1  # Show reconstructions every 3 epochs
     )
     

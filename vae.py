@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import get_device
+from einops import rearrange
+import math
 
 
 class VideoVAE(nn.Module):
@@ -10,30 +12,31 @@ class VideoVAE(nn.Module):
     Compression ratio: 10x in each spatial dimension
     """
     
-    def __init__(self, latent_dim=8):
+    def __init__(self, latent_dim=8, model_size=1):
         super().__init__()
         self.latent_dim = latent_dim
+        self.model_size = model_size
         
         # Encoder: 320x180 -> 32x18 (exactly 10x reduction in each dim)
         self.encoder = nn.Sequential(
             # 320x180 -> 160x90
-            nn.Conv2d(3, 32, 4, stride=2, padding=1),
+            nn.Conv2d(3, 32 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 160x90 -> 80x45
-            nn.Conv2d(32, 64, 4, stride=2, padding=1),
+            nn.Conv2d(32 * model_size, 64 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 80x45 -> 40x23 (45//2 = 22, need +1 for 23 due to padding)
-            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.Conv2d(64 * model_size, 128 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 40x23 -> 20x12 (23//2 = 11, need +1 for 12 due to padding)  
-            nn.Conv2d(128, 128, 4, stride=2, padding=1),
+            nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 20x12 -> 10x6
-            nn.Conv2d(128, 128, 4, stride=2, padding=1),
+            nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
         )
         
@@ -41,38 +44,38 @@ class VideoVAE(nn.Module):
         self.encoder_pool = nn.Upsample(size=(18, 32), mode='nearest')
         
         # Final conv layers for mu and logvar
-        self.fc_mu = nn.Conv2d(128, latent_dim, 1)
-        self.fc_logvar = nn.Conv2d(128, latent_dim, 1)
+        self.fc_mu = nn.Conv2d(128 * model_size, latent_dim, 1)
+        self.fc_logvar = nn.Conv2d(128 * model_size, latent_dim, 1)
         
         # Decoder: 18x32x<latent_dim> -> 180x320x3
-        self.decoder_input = nn.Conv2d(latent_dim, 128, 1)
+        self.decoder_input = nn.Conv2d(latent_dim, 128 * model_size, 1)
         
         # First downsample to match encoder path
         self.decoder_downsample = nn.Upsample(size=(6, 10), mode='nearest')  # 18x32 -> 6x10
         
         self.decoder = nn.Sequential(
             # 6x10 -> 12x20
-            nn.ConvTranspose2d(128, 128, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 12x20 -> 23x40 (note: will be slightly off, need to crop)
-            nn.ConvTranspose2d(128, 128, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 23x40 -> 45x80
-            nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 * model_size, 64 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 45x80 -> 90x160
-            nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # 90x160 -> 180x320
-            nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(32 * model_size, 16 * model_size, 4, stride=2, padding=1),
             nn.ReLU(),
             
             # Final layer
-            nn.Conv2d(16, 3, 3, padding=1),
+            nn.Conv2d(16 * model_size, 3, 3, padding=1),
             nn.Tanh()  # Output in [-1, 1] to match input normalization
         )
         
@@ -153,59 +156,78 @@ class VideoVAE(nn.Module):
         return samples
 
 
-def vae_loss(reconstruction, target, mu, logvar, beta=0.0):
+def vae_loss(vae, frames, beta=1e-5, gamma=0.01):
     """
     VAE loss function
     Args:
-        reconstruction: reconstructed frames
-        target: original frames  
-        mu: mean of latent distribution
-        logvar: log variance of latent distribution
+        vae: VAE model
+        frames: original frames (B, T, 3, 180, 320)
         beta: weight for KL divergence (beta-VAE)
     Returns:
         total_loss, reconstruction_loss, kl_loss
     """
-    # Reconstruction loss (MSE)
-    recon_loss = F.mse_loss(reconstruction, target, reduction='mean')
+
+    t = frames.shape[1]
+    input = rearrange(frames, 'b t c h w -> (b t) c h w')
+    reconstruction, mu, logvar = vae(input)
+    reconstruction = rearrange(reconstruction, '(b t) c h w -> b t c h w', t=t)
+    mu = rearrange(mu, '(b t) c h w -> b t c h w', t=t)
+    logvar = rearrange(logvar, '(b t) c h w -> b t c h w', t=t)
     
+    # Reconstruction loss (MSE)
+    recon_loss = F.mse_loss(reconstruction, frames, reduction='mean')
+    
+    # Also optimize for reconstruction of the difference between consecutive frames
+    frames_diff = frames[:, 1:] - frames[:, :-1]
+    reconstruction_diff = reconstruction[:, 1:] - reconstruction[:, :-1]
+    diff_loss = F.mse_loss(frames_diff, reconstruction_diff, reduction='mean')
+
+    
+    # Similarity loss based on temporal closeness using Gaussian weighting
+    # Encourage latent codes of nearby frames to be similar
+    sim_loss = 0
+    sigma = t / 4  # Set sigma to quarter of sequence length
+    for t1 in range(t):
+        for t2 in range(t):
+            # Gaussian weight based on temporal distance
+            weight = math.exp(-0.5 * ((t1 - t2) / sigma) ** 2)
+            sim_loss += weight * F.mse_loss(mu[:,t1], mu[:,t2], reduction='mean')
+    sim_loss = gamma * sim_loss / (t * t)  # Normalize by number of pairs
+
     # KL divergence loss
     kl_loss = -0.5 * beta * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
     
     # Total loss
-    total_loss = recon_loss + kl_loss
+    total_loss = recon_loss + kl_loss + sim_loss + diff_loss
     
-    return total_loss, recon_loss, kl_loss
+    return total_loss, recon_loss, kl_loss, sim_loss, diff_loss
 
 
-def create_video_vae(latent_dim=8):
+def create_video_vae(latent_dim=8, model_size=1):
     """Create VideoVAE model"""
-    return VideoVAE(latent_dim=latent_dim)
+    return VideoVAE(latent_dim=latent_dim, model_size=model_size)
 
 
 if __name__ == "__main__":
     # Test the VAE
     device = get_device()
-    vae = create_video_vae(latent_dim=8).to(device)
+    vae = create_video_vae(latent_dim=8, model_size=1).to(device)
     
     # Test with dummy input
     batch_size = 4
-    x = torch.randn(batch_size, 3, 180, 320).to(device)
+    seq_len = 32
+    x = torch.randn(batch_size, seq_len, 3, 180, 320).to(device)
     
     print(f"Input shape: {x.shape}")
     
-    # Forward pass
-    reconstruction, mu, logvar = vae(x)
-    
-    print(f"Reconstruction shape: {reconstruction.shape}")
-    print(f"Mu shape: {mu.shape}")
-    print(f"Logvar shape: {logvar.shape}")
-    
     # Test loss
-    total_loss, recon_loss, kl_loss = vae_loss(reconstruction, x, mu, logvar)
+    total_loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, x)
     print(f"Total loss: {total_loss.item():.4f}")
     print(f"Reconstruction loss: {recon_loss.item():.4f}")
     print(f"KL loss: {kl_loss.item():.4f}")
-    
+    print(f"Similarity loss: {sim_loss.item():.4f}")
+    print(f"Diff loss: {diff_loss.item():.4f}")
+
     # Test sampling
     samples = vae.sample(2, device)
     print(f"Sample shape: {samples.shape}")

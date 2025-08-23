@@ -327,7 +327,7 @@ if __name__ == "__main__":
     print(f"Frame range: [{dataset[0].min():.3f}, {dataset[0].max():.3f}]")
     
     # Show preview
-    preview_batch(dataset, batch_size=12)
+    preview_batch(dataset, batch_size=4)
     
     # Save sample video
     print("\n" + "="*50)
