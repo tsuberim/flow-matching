@@ -87,15 +87,6 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
     
-    # Limit dataset to ensure exactly 1000 batches
-    target_batches = 1024
-    required_samples = target_batches * batch_size
-    
-    if len(dataset) > required_samples:
-        # Use subset to get exactly 1000 batches
-        indices = torch.randperm(len(dataset))[:required_samples]
-        dataset = torch.utils.data.Subset(dataset, indices)
-    
     num_workers = min(2, os.cpu_count())
     
     dataloader = DataLoader(
@@ -108,7 +99,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     print(f"Using {num_workers} DataLoader workers")
     print(f"Dataset size: {len(dataset)} frames")
-    print(f"Number of batches: {len(dataloader)} (target: {target_batches})")
+    print(f"Number of batches: {len(dataloader)}")
     
     # Create VAE model and move to device
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
@@ -199,6 +190,42 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                     "learning_rate": optimizer.param_groups[0]['lr'],
                     "step": epoch * len(dataloader) + batch_idx
                 })
+            
+            # Checkpoint and log images every 100 batches
+            if batch_idx % 100 == 0:
+                # Save checkpoint
+                model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
+                save_file(model_state, checkpoint_path)
+                
+                # Save training metadata
+                metadata = {
+                    'epoch': epoch,
+                    'batch': batch_idx,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'loss': loss.item(),
+                    'best_loss': best_loss,
+                    'latent_dim': latent_dim,
+                    'beta': beta,
+                    'model_size': model_size,
+                }
+                torch.save(metadata, metadata_path)
+                
+                # Log reconstruction images
+                vae.eval()
+                with torch.no_grad():
+                    # Use current batch for visualization
+                    b, t, c, h, w = frames.shape
+                    sample_flat = frames.view(b * t, c, h, w)
+                    sample_recon, _, _ = vae(sample_flat)
+                    sample_recon = sample_recon.view(b, t, c, h, w)
+                    
+                    log_reconstruction_to_wandb(
+                        frames[:, 0], sample_recon[:, 0], f"E{epoch+1}_B{batch_idx}"
+                    )
+                vae.train()
+                
+                print(f"Checkpoint saved at epoch {epoch+1}, batch {batch_idx} (loss: {loss.item():.4f})")
         
         # Calculate average losses
         avg_loss = total_loss / len(dataloader)
@@ -231,42 +258,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         if avg_loss < best_loss:
             best_loss = avg_loss
         
-        # Visualize reconstruction after every epoch
-        vae.eval()
-        with torch.no_grad():
-            # Get a batch for visualization
-            sample_batch = next(iter(dataloader)).to(device)
-            # Reshape for VAE: [B, T, C, H, W] -> [B*T, C, H, W]
-            b, t, c, h, w = sample_batch.shape
-            sample_flat = sample_batch.view(b * t, c, h, w)
-            sample_recon, _, _ = vae(sample_flat)
-            # Reshape back: [B*T, C, H, W] -> [B, T, C, H, W]
-            sample_recon = sample_recon.view(b, t, c, h, w)
-            
-            # Log reconstruction images to wandb
-            log_reconstruction_to_wandb(
-                sample_batch[:, 0], sample_recon[:, 0], epoch + 1
-            )
-        vae.train()
-        
-        # Save checkpoint every epoch using safetensors
-        # Save model weights (handle DataParallel)
-        model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
-        save_file(model_state, checkpoint_path)
-        
-        # Save training metadata
-        metadata = {
-            'epoch': epoch,
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'loss': avg_loss,
-            'best_loss': best_loss,
-            'latent_dim': latent_dim,
-            'beta': beta,
-            'model_size': model_size,
-        }
-        torch.save(metadata, metadata_path)
-        print(f"Checkpoint saved at epoch {epoch+1} (loss: {avg_loss:.4f}, best: {best_loss:.4f})")
+        print(f"Epoch {epoch+1} completed (avg loss: {avg_loss:.4f}, best: {best_loss:.4f})")
     
     # Final model save using safetensors
     final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
