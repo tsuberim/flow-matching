@@ -121,15 +121,22 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     # Use batch_size per GPU, DataParallel will handle splitting across GPUs
     # Start with single worker for debugging, can increase once stable
     num_workers = 0  # Force single worker for remote debugging
-    dataloader = DataLoader(
-        dataset, 
-        batch_size=effective_batch_size, 
-        shuffle=True, 
-        num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
-        persistent_workers=False,
-        timeout=60  # 60 second timeout
-    )
+    
+    # Configure DataLoader based on worker count
+    dataloader_kwargs = {
+        'dataset': dataset,
+        'batch_size': effective_batch_size,
+        'shuffle': True,
+        'num_workers': num_workers,
+        'pin_memory': torch.cuda.is_available(),
+        'persistent_workers': False,
+    }
+    
+    # Only add timeout for multi-worker mode
+    if num_workers > 0:
+        dataloader_kwargs['timeout'] = 60
+    
+    dataloader = DataLoader(**dataloader_kwargs)
     print(f"Using {num_workers} DataLoader workers (debugging mode for remote)")
     
     print(f"Dataset size: {len(dataset)} frames")
