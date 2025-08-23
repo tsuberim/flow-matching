@@ -31,12 +31,17 @@ class VideoFrameDataset(Dataset):
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
         
-        # Get video info and frame indices
+        # Get video info and create frame mapping
         self._analyze_video()
         
-        # Always preload frames
-        print("Preloading frames into memory...")
-        self._preload_frames()
+        # Create frame mapping instead of preloading
+        print("Computing frame mapping for lazy loading...")
+        self._create_frame_mapping()
+        
+        # Keep video capture open for lazy loading
+        self.cap = cv2.VideoCapture(self.video_path)
+        if not self.cap.isOpened():
+            raise ValueError(f"Could not open video file for lazy loading: {self.video_path}")
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -62,12 +67,15 @@ class VideoFrameDataset(Dataset):
         print(f"  Duration: {duration:.2f} seconds")
         
         if self.num_frames is None:
-            # Use all frames from the entire video
-            print("Using ALL frames from entire video")
-            self.start_frame = 0
+            # Use all frames from the entire video, but skip first 30 seconds
+            skip_seconds = 30.0
+            skip_frames = int(skip_seconds * self.original_fps)
+            print(f"Using ALL frames from entire video (skipping first {skip_seconds}s / {skip_frames:,} frames)")
+            self.start_frame = min(skip_frames, total_frames - 1)
             self.end_frame = total_frames
             # Estimate how many frames we'll get after subsampling
-            estimated_subsampled_frames = int(duration / self.target_frame_interval)
+            usable_duration = duration - skip_seconds
+            estimated_subsampled_frames = int(max(0, usable_duration) / self.target_frame_interval)
             print(f"Estimated frames after subsampling: ~{estimated_subsampled_frames:,}")
         else:
             # Original behavior: use subset from 3/4 into video
@@ -94,38 +102,28 @@ class VideoFrameDataset(Dataset):
         
         cap.release()
     
-    def _preload_frames(self):
-        """Preload time-based subsampled frames into memory"""
-        self.frames = []
-        cap = cv2.VideoCapture(self.video_path)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, self.start_frame)
+    def _create_frame_mapping(self):
+        """Create mapping from subsampled indices to real video frame indices"""
+        self.frame_indices = []
         
         # Time-based sampling variables
         current_time = 0.0
         next_target_time = 0.0
         frames_collected = 0
+        frame_index = self.start_frame
         
-        # Determine total frames for progress bar
-        total_for_progress = self.num_frames if self.num_frames is not None else self.end_frame - self.start_frame
+        # Update loop condition for when num_frames is None
+        target_frames = self.num_frames if self.num_frames is not None else float('inf')
         
-        with tqdm(total=total_for_progress, desc="Loading frames") as pbar:
-            frame_index = self.start_frame
-            
-            # Update loop condition for when num_frames is None
-            target_frames = self.num_frames if self.num_frames is not None else float('inf')
+        print(f"Mapping frames from {self.start_frame} to {self.end_frame}")
+        
+        with tqdm(total=self.end_frame - self.start_frame, desc="Computing frame mapping") as pbar:
             while frames_collected < target_frames and frame_index < self.end_frame:
-                ret, frame = cap.read()
-                if not ret:
-                    print(f"Warning: Could not read frame {frame_index}")
-                    break
-                
                 # Check if current time matches or exceeds next target time
                 if current_time >= next_target_time:
-                    # Process and store this frame
-                    processed_frame = self._process_frame(frame)
-                    self.frames.append(processed_frame)
+                    # Store this frame index for lazy loading
+                    self.frame_indices.append(frame_index)
                     frames_collected += 1
-                    pbar.update(1)
                     
                     # Update next target time
                     next_target_time += self.target_frame_interval
@@ -133,14 +131,15 @@ class VideoFrameDataset(Dataset):
                 # Advance time by one original frame interval
                 current_time += self.original_frame_interval
                 frame_index += 1
+                pbar.update(1)
         
-        cap.release()
-        
-        # Update actual number of frames loaded (only if it was originally None)
+        # Update actual number of frames (only if it was originally None)
         if self.num_frames is None:
-            self.num_frames = len(self.frames)
-        print(f"Loaded {len(self.frames):,} time-subsampled frames")
+            self.num_frames = len(self.frame_indices)
+        
+        print(f"Created mapping for {len(self.frame_indices):,} time-subsampled frames")
         print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
+        print(f"Frame range: {self.frame_indices[0]} to {self.frame_indices[-1]}")
     
     def _process_frame(self, frame):
         """Process a single frame: resize and convert to tensor"""
@@ -158,21 +157,43 @@ class VideoFrameDataset(Dataset):
         
         return tensor
     
+    def _load_frame_by_index(self, mapped_idx):
+        """Load a single frame by its mapped index"""
+        if mapped_idx >= len(self.frame_indices):
+            raise IndexError(f"Mapped index {mapped_idx} out of range for {len(self.frame_indices)} frames")
+        
+        real_frame_idx = self.frame_indices[mapped_idx]
+        
+        # Set video position to the desired frame
+        self.cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
+        ret, frame = self.cap.read()
+        
+        if not ret:
+            raise RuntimeError(f"Could not read frame {real_frame_idx} from video")
+        
+        return self._process_frame(frame)
+    
     def __len__(self):
         # Number of possible sequences (accounting for sequence length)
-        return max(0, self.num_frames - self.sequence_length + 1)
+        return max(0, len(self.frame_indices) - self.sequence_length + 1)
     
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of range for {len(self)} sequences")
         
-        # Return sequence of frames starting at idx
+        # Lazily load sequence of frames starting at idx
         sequence = []
         for i in range(self.sequence_length):
-            sequence.append(self.frames[idx + i])
+            frame = self._load_frame_by_index(idx + i)
+            sequence.append(frame)
         
         # Stack into tensor: (sequence_length, channels, height, width)
         return torch.stack(sequence, dim=0)
+    
+    def __del__(self):
+        """Cleanup: release video capture when dataset is destroyed"""
+        if hasattr(self, 'cap') and self.cap is not None:
+            self.cap.release()
 
 
 def find_video_file(video_dir='./videos'):
