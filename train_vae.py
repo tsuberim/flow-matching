@@ -101,7 +101,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     # Single GPU training setup
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
-    effective_batch_size = batch_size
+    effective_batch_size = batch_size * num_gpus_used
     
     # Initialize wandb
     wandb.init(
