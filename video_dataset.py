@@ -5,7 +5,6 @@ import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
-import threading
 
 
 class VideoFrameDataset(Dataset):
@@ -39,9 +38,9 @@ class VideoFrameDataset(Dataset):
         print("Computing frame mapping for lazy loading...")
         self._create_frame_mapping()
         
-        # Store video path for per-thread video capture creation
-        # Each DataLoader worker will create its own cv2.VideoCapture instance
-        self._thread_local = threading.local()
+        # Store process ID to detect when we're in a new process (DataLoader worker)
+        self._current_process_id = os.getpid()
+        self._process_video_cap = None
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -157,15 +156,27 @@ class VideoFrameDataset(Dataset):
         
         return tensor
     
-    def _get_thread_video_cap(self):
-        """Get or create a video capture instance for the current thread"""
-        if not hasattr(self._thread_local, 'cap'):
-            # Create a new video capture for this thread
-            self._thread_local.cap = cv2.VideoCapture(self.video_path)
-            self._thread_local.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if not self._thread_local.cap.isOpened():
-                raise ValueError(f"Could not open video file in thread: {self.video_path}")
-        return self._thread_local.cap
+    def _get_process_video_cap(self):
+        """Get or create a video capture for the current process"""
+        current_pid = os.getpid()
+        
+        # Check if we're in a new process or need to create a new capture
+        if (self._process_video_cap is None or 
+            self._current_process_id != current_pid):
+            
+            # Clean up old capture if it exists
+            if self._process_video_cap is not None:
+                self._process_video_cap.release()
+            
+            # Create new capture for this process
+            self._process_video_cap = cv2.VideoCapture(self.video_path)
+            self._process_video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self._current_process_id = current_pid
+            
+            if not self._process_video_cap.isOpened():
+                raise ValueError(f"Could not open video file in process {current_pid}: {self.video_path}")
+        
+        return self._process_video_cap
     
     def _load_frame_by_index(self, mapped_idx):
         """Load a single frame by its mapped index"""
@@ -174,8 +185,8 @@ class VideoFrameDataset(Dataset):
         
         real_frame_idx = self.frame_indices[mapped_idx]
         
-        # Get thread-local video capture (no locks needed!)
-        cap = self._get_thread_video_cap()
+        # Get per-process video capture (reused within same process)
+        cap = self._get_process_video_cap()
         
         # Set video position to the desired frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
@@ -204,12 +215,10 @@ class VideoFrameDataset(Dataset):
         return torch.stack(sequence, dim=0)
     
     def __del__(self):
-        """Cleanup: release thread-local video captures when dataset is destroyed"""
-        # Note: thread-local video captures will be automatically cleaned up
-        # when threads end, but we can try to clean up the main thread one
-        if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'cap'):
+        """Cleanup: release process video capture"""
+        if hasattr(self, '_process_video_cap') and self._process_video_cap is not None:
             try:
-                self._thread_local.cap.release()
+                self._process_video_cap.release()
             except:
                 pass
 
