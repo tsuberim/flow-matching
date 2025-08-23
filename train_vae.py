@@ -119,16 +119,33 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     # Use DataParallel if multiple GPUs are available
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        num_gpus = torch.cuda.device_count()
+        print(f"Using {num_gpus} GPUs with DataParallel")
         vae = torch.nn.DataParallel(vae)
         # Scale batch size by number of GPUs for better utilization
-        effective_batch_size = batch_size * torch.cuda.device_count()
+        effective_batch_size = batch_size * num_gpus
+        # Scale learning rate by number of GPUs (linear scaling rule)
+        scaled_lr = lr * num_gpus
         print(f"Effective batch size across GPUs: {effective_batch_size}")
+        print(f"Scaled learning rate: {lr} -> {scaled_lr} (x{num_gpus})")
+        # Update wandb config with scaled values
+        wandb.config.update({
+            "effective_batch_size": effective_batch_size,
+            "scaled_learning_rate": scaled_lr,
+            "num_gpus": num_gpus
+        })
     else:
         print(f"Using single device: {device}")
+        scaled_lr = lr
+        # Update wandb config for single GPU
+        wandb.config.update({
+            "effective_batch_size": batch_size,
+            "scaled_learning_rate": scaled_lr,
+            "num_gpus": 1
+        })
     
     # Set up optimizer and scheduler
-    optimizer = optim.Adam(vae.parameters(), lr=lr)
+    optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
     # Load checkpoint if exists (metadata already loaded above for wandb)
