@@ -105,6 +105,16 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
     vae = vae.to(device)
     
+    # Use DataParallel if multiple GPUs are available
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        vae = torch.nn.DataParallel(vae)
+        # Scale batch size by number of GPUs for better utilization
+        effective_batch_size = batch_size * torch.cuda.device_count()
+        print(f"Effective batch size across GPUs: {effective_batch_size}")
+    else:
+        print(f"Using single device: {device}")
+    
     # Set up optimizer and scheduler
     optimizer = optim.Adam(vae.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
@@ -261,7 +271,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     # Final model save using safetensors
     final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
-    final_model_state = vae.state_dict()
+    # Handle DataParallel for final save
+    final_model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
     save_file(final_model_state, final_model_path)
     print(f"Final model saved as '{final_model_path}'")
     
@@ -288,6 +299,10 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     # Load trained VAE
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
     vae = vae.to(device)
+    
+    # Use DataParallel if multiple GPUs are available (for consistency)
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        vae = torch.nn.DataParallel(vae)
     
     try:
         model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
