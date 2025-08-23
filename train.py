@@ -147,7 +147,7 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, num_frames=10000, latent_dim
 if __name__ == "__main__":
     train_model(
         epochs=50,
-        batch_size=16,      # Smaller batch size for sequences
+        batch_size=256 + 128,      # Smaller batch size for sequences
         lr=1e-4,           # Lower learning rate for stability
         num_frames=10000,
         latent_dim=16,

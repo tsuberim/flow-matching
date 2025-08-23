@@ -4,3 +4,5 @@ videos
 data
 __pycache__
 output
+samples
+*.png
