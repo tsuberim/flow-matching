@@ -201,6 +201,7 @@ def vae_loss(vae, frames, beta=0.0, gamma=0.0):
     """
     t = frames.shape[1]
     input = rearrange(frames, 'b t c h w -> (b t) c h w')
+    print(f"Input shape: {input.shape}")
     reconstruction, mu, logvar = vae(input)
     reconstruction = rearrange(reconstruction, '(b t) c h w -> b t c h w', t=t)
     mu = rearrange(mu, '(b t) c h w -> b t c h w', t=t)
@@ -209,10 +210,13 @@ def vae_loss(vae, frames, beta=0.0, gamma=0.0):
     # Reconstruction loss (MSE)
     recon_loss = F.mse_loss(reconstruction, frames, reduction='mean')
     
-    # Also optimize for reconstruction of the difference between consecutive frames
-    frames_diff = frames[:, 1:] - frames[:, :-1]
-    reconstruction_diff = reconstruction[:, 1:] - reconstruction[:, :-1]
-    diff_loss = F.mse_loss(frames_diff, reconstruction_diff, reduction='mean')
+    if t > 1:
+        # Also optimize for reconstruction of the difference between consecutive frames
+        frames_diff = frames[:, 1:] - frames[:, :-1]
+        reconstruction_diff = reconstruction[:, 1:] - reconstruction[:, :-1]
+        diff_loss = F.mse_loss(frames_diff, reconstruction_diff, reduction='mean')
+    else:
+        diff_loss = torch.zeros(1).to(frames.device)
 
     
     # Similarity loss based on temporal closeness using Gaussian weighting
