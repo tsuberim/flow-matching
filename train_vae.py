@@ -68,9 +68,23 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print(f"Using device: {device}")
     print(f"Batch size: {batch_size}")
     
-    # Initialize wandb
+    # Load checkpoint metadata first to get wandb run ID
+    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
+    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
+    wandb_run_id = None
+    
+    try:
+        metadata = torch.load(metadata_path, map_location=device)
+        wandb_run_id = metadata.get('wandb_run_id')
+        print(f"Found existing wandb run ID: {wandb_run_id}")
+    except (FileNotFoundError, KeyError):
+        print("No existing checkpoint found, will create new wandb run")
+    
+    # Initialize wandb (resume if we have a run ID)
     wandb.init(
         project=project_name,
+        id=wandb_run_id,
+        resume="allow" if wandb_run_id else None,
         config={
             "epochs": epochs,
             "batch_size": batch_size,
@@ -107,32 +121,32 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     optimizer = optim.Adam(vae.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
-    # Load checkpoint if exists
-    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
-    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
+    # Load checkpoint if exists (metadata already loaded above for wandb)
     start_epoch = 0
     best_loss = float('inf')
     
-    try:
-        # Load model weights from safetensors
-        model_state = load_file(checkpoint_path)
-        
-        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
-        if any(key.startswith('module.') for key in model_state.keys()):
-            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
-        
-        vae.load_state_dict(model_state)
-        
-        # Load training metadata from regular torch file
-        metadata = torch.load(metadata_path, map_location=device)
-        optimizer.load_state_dict(metadata['optimizer_state_dict'])
-        if 'scheduler_state_dict' in metadata:
-            scheduler.load_state_dict(metadata['scheduler_state_dict'])
-        start_epoch = metadata['epoch'] + 1
-        best_loss = metadata.get('best_loss', float('inf'))
-        print(f"Loaded checkpoint from epoch {metadata['epoch']}")
-        print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
-    except (FileNotFoundError, KeyError) as e:
+    if wandb_run_id is not None:
+        try:
+            # Load model weights from safetensors
+            model_state = load_file(checkpoint_path)
+            
+            # Remove 'module.' prefix if loading DataParallel weights to single GPU model
+            if any(key.startswith('module.') for key in model_state.keys()):
+                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            
+            vae.load_state_dict(model_state)
+            
+            # Use already loaded metadata
+            optimizer.load_state_dict(metadata['optimizer_state_dict'])
+            if 'scheduler_state_dict' in metadata:
+                scheduler.load_state_dict(metadata['scheduler_state_dict'])
+            start_epoch = metadata['epoch'] + 1
+            best_loss = metadata.get('best_loss', float('inf'))
+            print(f"Loaded checkpoint from epoch {metadata['epoch']}")
+            print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
+        except (FileNotFoundError, KeyError) as e:
+            print(f"Checkpoint metadata found but model loading failed: {e}")
+    else:
         print(f"No checkpoint found, starting from scratch")
     
     # Training loop
@@ -205,6 +219,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                     'latent_dim': latent_dim,
                     'beta': beta,
                     'model_size': model_size,
+                    'wandb_run_id': wandb.run.id,
                 }
                 torch.save(metadata, metadata_path)
                 
