@@ -3,58 +3,50 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 import numpy as np
+import wandb
+from safetensors.torch import save_file, load_file
+import os
 
 from vae import create_video_vae, vae_loss
 from video_dataset import create_video_dataset
 from utils import get_device
 
 
-def visualize_reconstruction(original, reconstruction, epoch, save_path=None):
+def log_reconstruction_to_wandb(original, reconstruction, epoch):
     """
-    Visualize original vs reconstructed frames
+    Log original vs reconstructed frames to wandb
     
     Args:
         original: [B, 3, 180, 320] original frames
         reconstruction: [B, 3, 180, 320] reconstructed frames
         epoch: current epoch number
-        save_path: path to save image (optional)
     """
-    # Take first 8 samples
-    num_samples = min(8, original.shape[0])
+    # Take first 4 samples for wandb logging
+    num_samples = min(4, original.shape[0])
     
-    fig, axes = plt.subplots(2, num_samples, figsize=(16, 4))
-    
+    images = []
     for i in range(num_samples):
         # Original
         orig_img = original[i].permute(1, 2, 0).cpu()
         orig_img = torch.clamp((orig_img + 1) / 2, 0, 1)  # [-1,1] -> [0,1]
-        axes[0, i].imshow(orig_img.numpy())
-        axes[0, i].axis('off')
-        if i == 0:
-            axes[0, i].set_title('Original', fontweight='bold')
         
         # Reconstruction
         recon_img = reconstruction[i].permute(1, 2, 0).cpu()
         recon_img = torch.clamp((recon_img + 1) / 2, 0, 1)  # [-1,1] -> [0,1]
-        axes[1, i].imshow(recon_img.numpy())
-        axes[1, i].axis('off')
-        if i == 0:
-            axes[1, i].set_title('Reconstructed', fontweight='bold')
+        
+        # Create side-by-side comparison
+        comparison = torch.cat([orig_img, recon_img], dim=1)  # Concatenate horizontally
+        images.append(wandb.Image(comparison.numpy(), caption=f"Sample {i+1}: Original (left) vs Reconstructed (right)"))
     
-    plt.suptitle(f'VAE Reconstruction - Epoch {epoch}', fontsize=14)
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=100, bbox_inches='tight')
-        print(f"Visualization saved to {save_path}")
-    
-    plt.show()
+    wandb.log({
+        "reconstructions": images,
+        "epoch": epoch
+    })
 
 
 def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8, 
-              num_frames=10000, visualize_every=10):
+              num_frames=10000, visualize_every=10, model_size=1, project_name="video-vae"):
     """
     Train the VAE on video frames
     
@@ -66,8 +58,25 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         latent_dim: latent space dimensionality
         num_frames: number of frames to use from video
         visualize_every: visualize reconstruction every N epochs
+        model_size: model size multiplier for channels
+        project_name: wandb project name
     """
     device = get_device()
+    
+    # Initialize wandb
+    wandb.init(
+        project=project_name,
+        config={
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "beta": beta,
+            "latent_dim": latent_dim,
+            "num_frames": num_frames,
+            "model_size": model_size,
+            "device": str(device)
+        }
+    )
     
     # Create dataset and dataloader
     print("Loading video dataset...")
@@ -78,26 +87,31 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print(f"Number of batches: {len(dataloader)}")
     
     # Create VAE model
-    vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
+    vae = create_video_vae(latent_dim=latent_dim, model_size=model_size).to(device)
     optimizer = optim.Adam(vae.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
     # Load checkpoint if exists
-    checkpoint_path = f'vae_checkpoint_dim{latent_dim}.pth'
+    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
+    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
     start_epoch = 0
     best_loss = float('inf')
     
     try:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        vae.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        best_loss = checkpoint.get('best_loss', float('inf'))
-        print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
+        # Load model weights from safetensors
+        model_state = load_file(checkpoint_path)
+        vae.load_state_dict(model_state)
+        
+        # Load training metadata from regular torch file
+        metadata = torch.load(metadata_path, map_location=device)
+        optimizer.load_state_dict(metadata['optimizer_state_dict'])
+        if 'scheduler_state_dict' in metadata:
+            scheduler.load_state_dict(metadata['scheduler_state_dict'])
+        start_epoch = metadata['epoch'] + 1
+        best_loss = metadata.get('best_loss', float('inf'))
+        print(f"Loaded checkpoint from epoch {metadata['epoch']}")
         print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError) as e:
         print(f"No checkpoint found, starting from scratch")
     
     # Training loop
@@ -142,6 +156,18 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                 'Sim': f'{sim_loss.item():.4f}',
                 'Diff': f'{diff_loss.item():.4f}'
             })
+            
+            # Log metrics to wandb every few batches
+            if batch_idx % 10 == 0:
+                wandb.log({
+                    "batch_loss": loss.item(),
+                    "batch_recon_loss": recon_loss.item(),
+                    "batch_kl_loss": kl_loss.item(),
+                    "batch_sim_loss": sim_loss.item(),
+                    "batch_diff_loss": diff_loss.item(),
+                    "learning_rate": optimizer.param_groups[0]['lr'],
+                    "step": epoch * len(dataloader) + batch_idx
+                })
         
         # Calculate average losses
         avg_loss = total_loss / len(dataloader)
@@ -156,6 +182,17 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         print(f'  KL Loss: {avg_kl_loss:.4f}')
         print(f'  Sim Loss: {avg_sim_loss:.4f}')
         print(f'  Diff Loss: {avg_diff_loss:.4f}')
+        
+        # Log epoch metrics to wandb
+        wandb.log({
+            "epoch": epoch + 1,
+            "avg_loss": avg_loss,
+            "avg_recon_loss": avg_recon_loss,
+            "avg_kl_loss": avg_kl_loss,
+            "avg_sim_loss": avg_sim_loss,
+            "avg_diff_loss": avg_diff_loss
+        })
+        
         # Step scheduler
         scheduler.step(avg_loss)
         
@@ -175,49 +212,58 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Reshape back: [B*T, C, H, W] -> [B, T, C, H, W]
             sample_recon = sample_recon.view(b, t, c, h, w)
             
-            # Take first frame from each sequence for visualization
-            visualize_reconstruction(
+            # Log reconstruction images to wandb
+            log_reconstruction_to_wandb(
                 sample_batch[:, 0], sample_recon[:, 0], epoch + 1
             )
         vae.train()
         
-        # Save checkpoint every epoch
-        checkpoint = {
+        # Save checkpoint every epoch using safetensors
+        # Save model weights
+        save_file(vae.state_dict(), checkpoint_path)
+        
+        # Save training metadata
+        metadata = {
             'epoch': epoch,
-            'model_state_dict': vae.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
             'loss': avg_loss,
             'best_loss': best_loss,
             'latent_dim': latent_dim,
             'beta': beta,
+            'model_size': model_size,
         }
-        torch.save(checkpoint, checkpoint_path)
+        torch.save(metadata, metadata_path)
         print(f"Checkpoint saved at epoch {epoch+1} (loss: {avg_loss:.4f}, best: {best_loss:.4f})")
     
-    # Final model save
-    final_model_path = f'vae_final_dim{latent_dim}.pth'
-    torch.save(vae.state_dict(), final_model_path)
+    # Final model save using safetensors
+    final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
+    save_file(vae.state_dict(), final_model_path)
     print(f"Final model saved as '{final_model_path}'")
+    
+    # Finish wandb run
+    wandb.finish()
     
     return vae
 
 
-def test_vae_sampling(latent_dim=8, num_samples=16):
+def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     """
     Test VAE sampling from latent space
     
     Args:
         latent_dim: latent space dimensionality
         num_samples: number of samples to generate
+        model_size: model size multiplier
     """
     device = get_device()
     
     # Load trained VAE
-    vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
+    vae = create_video_vae(latent_dim=latent_dim, model_size=model_size).to(device)
     
     try:
-        vae.load_state_dict(torch.load(f'vae_final_dim{latent_dim}.pth', map_location=device))
+        model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
+        vae.load_state_dict(model_state)
         print(f"Loaded trained VAE model")
     except FileNotFoundError:
         print(f"No trained model found, using random weights")
@@ -228,29 +274,19 @@ def test_vae_sampling(latent_dim=8, num_samples=16):
     with torch.no_grad():
         samples = vae.sample(num_samples, device)
     
-    # Visualize samples
-    grid_size = int(np.ceil(np.sqrt(num_samples)))
-    fig, axes = plt.subplots(grid_size, grid_size, figsize=(12, 12))
-    axes = axes.flatten() if num_samples > 1 else [axes]
-    
-    for i in range(num_samples):
-        # Convert from tensor to image
+    # Log samples to wandb instead of matplotlib
+    sample_images = []
+    for i in range(min(num_samples, 16)):  # Limit to 16 for wandb
         sample_img = samples[i].permute(1, 2, 0).cpu()
         sample_img = torch.clamp((sample_img + 1) / 2, 0, 1)  # [-1,1] -> [0,1]
-        
-        axes[i].imshow(sample_img.numpy())
-        axes[i].axis('off')
-        axes[i].set_title(f'Sample {i+1}', fontsize=8)
+        sample_images.append(wandb.Image(sample_img.numpy(), caption=f"Generated Sample {i+1}"))
     
-    # Hide unused subplots
-    for i in range(num_samples, len(axes)):
-        axes[i].axis('off')
+    # Initialize wandb for sampling if not already initialized
+    if not wandb.run:
+        wandb.init(project="video-vae-sampling", config={"latent_dim": latent_dim, "model_size": model_size})
     
-    plt.suptitle(f'VAE Generated Samples (latent_dim={latent_dim})', fontsize=14)
-    plt.tight_layout()
-    plt.savefig(f'vae_samples_dim{latent_dim}.png', dpi=150, bbox_inches='tight')
-    plt.show()
-    print(f"Samples saved as 'vae_samples_dim{latent_dim}.png'")
+    wandb.log({"generated_samples": sample_images})
+    print(f"Generated {len(sample_images)} samples and logged to wandb")
 
 
 if __name__ == "__main__":
@@ -262,9 +298,11 @@ if __name__ == "__main__":
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
         num_frames=1000,  # Use subset for faster training
-        visualize_every=1  # Show reconstructions every 3 epochs
+        visualize_every=1,  # Show reconstructions every epoch
+        model_size=1,  # Model size multiplier
+        project_name="video-vae"
     )
     
     # Test sampling
     print("\nTesting VAE sampling...")
-    test_vae_sampling(latent_dim=16, num_samples=16)
+    test_vae_sampling(latent_dim=16, num_samples=16, model_size=1)

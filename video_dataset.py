@@ -13,11 +13,11 @@ class VideoFrameDataset(Dataset):
     Extracts sequences of frames from 3/4 into video, resizes to target size with no antialiasing
     """
     
-    def __init__(self, video_path, num_frames=10000, target_size=(320, 180), sequence_length=32, target_fps=12):
+    def __init__(self, video_path, num_frames=None, target_size=(320, 180), sequence_length=32, target_fps=12):
         """
         Args:
             video_path: Path to video file
-            num_frames: Number of frames to extract from 3/4 into video
+            num_frames: Number of frames to extract (None = all frames)
             target_size: Target resolution (width, height)
             sequence_length: Length of each sequence returned (default: 32)
             target_fps: Target FPS for subsampling (default: 12)
@@ -61,25 +61,35 @@ class VideoFrameDataset(Dataset):
         print(f"  Target frame interval: {self.target_frame_interval:.4f}s")
         print(f"  Duration: {duration:.2f} seconds")
         
-        # Estimate available frames after time-based subsampling
-        section_duration = duration * 0.5  # We'll use middle 50% of video
-        estimated_subsampled_frames = int(section_duration / self.target_frame_interval)
+        if self.num_frames is None:
+            # Use all frames from the entire video
+            print("Using ALL frames from entire video")
+            self.start_frame = 0
+            self.end_frame = total_frames
+            # Estimate how many frames we'll get after subsampling
+            estimated_subsampled_frames = int(duration / self.target_frame_interval)
+            print(f"Estimated frames after subsampling: ~{estimated_subsampled_frames:,}")
+        else:
+            # Original behavior: use subset from 3/4 into video
+            section_duration = duration * 0.5  # We'll use middle 50% of video
+            estimated_subsampled_frames = int(section_duration / self.target_frame_interval)
+            
+            if estimated_subsampled_frames < self.num_frames:
+                print(f"Warning: Video section has only ~{estimated_subsampled_frames} subsampled frames, using all available")
+                self.num_frames = estimated_subsampled_frames
+            
+            # Calculate 3/4 section timing
+            three_quarter_time = duration * 0.75
+            section_start_time = max(0, three_quarter_time - (self.num_frames * self.target_frame_interval) / 2)
+            
+            # Convert times back to frame indices for the scan range
+            self.start_frame = max(0, int(section_start_time * self.original_fps))
+            # Add buffer for time-based sampling
+            estimated_frames_needed = int(self.num_frames * self.target_frame_interval * self.original_fps) + 100
+            self.end_frame = min(total_frames, self.start_frame + estimated_frames_needed)
+            
+            print(f"Using frames {self.start_frame:,} to {self.end_frame:,} from 3/4 into video")
         
-        if estimated_subsampled_frames < self.num_frames:
-            print(f"Warning: Video section has only ~{estimated_subsampled_frames} subsampled frames, using all available")
-            self.num_frames = estimated_subsampled_frames
-        
-        # Calculate 3/4 section timing
-        three_quarter_time = duration * 0.75
-        section_start_time = max(0, three_quarter_time - (self.num_frames * self.target_frame_interval) / 2)
-        
-        # Convert times back to frame indices for the scan range
-        self.start_frame = max(0, int(section_start_time * self.original_fps))
-        # Add buffer for time-based sampling
-        estimated_frames_needed = int(self.num_frames * self.target_frame_interval * self.original_fps) + 100
-        self.end_frame = min(total_frames, self.start_frame + estimated_frames_needed)
-        
-        print(f"Using frames {self.start_frame:,} to {self.end_frame:,} from 3/4 into video")
         print(f"Target size: {self.target_size[0]}x{self.target_size[1]}")
         
         cap.release()
@@ -95,10 +105,15 @@ class VideoFrameDataset(Dataset):
         next_target_time = 0.0
         frames_collected = 0
         
-        with tqdm(total=self.num_frames, desc="Loading frames") as pbar:
+        # Determine total frames for progress bar
+        total_for_progress = self.num_frames if self.num_frames is not None else self.end_frame - self.start_frame
+        
+        with tqdm(total=total_for_progress, desc="Loading frames") as pbar:
             frame_index = self.start_frame
             
-            while frames_collected < self.num_frames and frame_index < self.end_frame:
+            # Update loop condition for when num_frames is None
+            target_frames = self.num_frames if self.num_frames is not None else float('inf')
+            while frames_collected < target_frames and frame_index < self.end_frame:
                 ret, frame = cap.read()
                 if not ret:
                     print(f"Warning: Could not read frame {frame_index}")
@@ -121,8 +136,9 @@ class VideoFrameDataset(Dataset):
         
         cap.release()
         
-        # Update actual number of frames loaded
-        self.num_frames = len(self.frames)
+        # Update actual number of frames loaded (only if it was originally None)
+        if self.num_frames is None:
+            self.num_frames = len(self.frames)
         print(f"Loaded {len(self.frames):,} time-subsampled frames")
         print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
     
@@ -318,8 +334,9 @@ def save_sample_video(dataset, output_dir='./samples', video_length=64, fps=12):
 
 
 if __name__ == "__main__":
-    # Example usage with 12 FPS subsampling
-    dataset = create_video_dataset(num_frames=1000, target_fps=12)
+    # Example usage with all frames (12 FPS subsampling)
+    print("Loading ALL frames from video...")
+    dataset = create_video_dataset(num_frames=None, target_fps=12)
     
     print(f"Dataset length: {len(dataset)}")
     print(f"Frame shape: {dataset[0].shape}")
