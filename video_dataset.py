@@ -98,13 +98,72 @@ class VideoFrameDataset(Dataset):
         cap.release()
     
     def _preload_frames(self):
-        """Preload all frames into memory"""
+        """Preload all frames into memory with optimized batch processing"""
         # Open video capture for preloading
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             raise ValueError(f"Could not open video file: {self.video_path}")
         
+        # Disable buffering for more predictable frame access
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        # First pass: determine which frame indices we need
+        target_frame_indices = self._compute_target_frame_indices()
+        
+        if not target_frame_indices:
+            self.frames_tensor = torch.empty(0, 3, *self.target_size[::-1])
+            print("No frames to load")
+            return
+        
+        # Preallocate tensor for better memory efficiency
+        num_frames = len(target_frame_indices)
+        h, w = self.target_size[1], self.target_size[0]  # target_size is (width, height)
+        self.frames_tensor = torch.empty(num_frames, 3, h, w, dtype=torch.float32)
+        
+        print(f"Preloading {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
+        print(f"Preallocated tensor shape: {self.frames_tensor.shape}")
+        
+        # Batch processing for better performance
+        batch_size = 100  # Process frames in batches
+        frames_loaded = 0
+        
+        with tqdm(total=num_frames, desc="Preloading frames") as pbar:
+            for batch_start in range(0, num_frames, batch_size):
+                batch_end = min(batch_start + batch_size, num_frames)
+                batch_indices = target_frame_indices[batch_start:batch_end]
+                
+                # Process batch
+                for i, frame_idx in enumerate(batch_indices):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = cap.read()
+                    
+                    if ret:
+                        # Process frame directly into preallocated tensor
+                        self._process_frame_into_tensor(frame, frames_loaded)
+                        frames_loaded += 1
+                    else:
+                        print(f"Warning: Could not read frame {frame_idx}")
+                    
+                    pbar.update(1)
+        
+        cap.release()
+        
+        # Trim tensor if some frames failed to load
+        if frames_loaded < num_frames:
+            self.frames_tensor = self.frames_tensor[:frames_loaded]
+        
+        # Update actual number of frames
+        if self.num_frames is None:
+            self.num_frames = frames_loaded
+        
+        print(f"Successfully preloaded {len(self.frames_tensor):,} frames")
+        print(f"Tensor shape: {self.frames_tensor.shape}")
+        print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
+        print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
+    
+    def _compute_target_frame_indices(self):
+        """Compute which frame indices we need based on time sampling"""
+        target_frame_indices = []
         
         # Time-based sampling variables
         current_time = 0.0
@@ -112,57 +171,36 @@ class VideoFrameDataset(Dataset):
         frames_collected = 0
         frame_index = self.start_frame
         
-        # Update loop condition for when num_frames is None
         target_frames = self.num_frames if self.num_frames is not None else float('inf')
         
-        self.frames = []  # Store actual frame tensors
-        
-        print(f"Preloading frames from {self.start_frame} to {self.end_frame}")
-        
-        with tqdm(total=self.end_frame - self.start_frame, desc="Preloading frames") as pbar:
-            while frames_collected < target_frames and frame_index < self.end_frame:
-                # Check if current time matches or exceeds next target time
-                if current_time >= next_target_time:
-                    # Load and process this frame
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-                    ret, frame = cap.read()
-                    
-                    if ret:
-                        processed_frame = self._process_frame(frame)
-                        self.frames.append(processed_frame)
-                        frames_collected += 1
-                    else:
-                        print(f"Warning: Could not read frame {frame_index}")
-                    
-                    # Update next target time
-                    next_target_time += self.target_frame_interval
-                
-                # Advance time by one original frame interval
-                current_time += self.original_frame_interval
-                frame_index += 1
-                pbar.update(1)
-        
-        cap.release()
-        
-        # Update actual number of frames (only if it was originally None)
-        if self.num_frames is None:
-            self.num_frames = len(self.frames)
-        
-        # Stack all frames into a single tensor for efficient memory layout
-        if self.frames:
-            print("Stacking frames into tensor...")
-            self.frames_tensor = torch.stack(self.frames, dim=0)  # [num_frames, C, H, W]
-            # Clear the list to save memory
-            self.frames.clear()
-            self.frames = None
+        while frames_collected < target_frames and frame_index < self.end_frame:
+            # Check if current time matches or exceeds next target time
+            if current_time >= next_target_time:
+                target_frame_indices.append(frame_index)
+                frames_collected += 1
+                next_target_time += self.target_frame_interval
             
-            print(f"Preloaded {len(self.frames_tensor):,} frames into stacked tensor")
-            print(f"Tensor shape: {self.frames_tensor.shape}")
-            print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
-            print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
-        else:
-            self.frames_tensor = torch.empty(0, 3, *self.target_size[::-1])
-            print("No frames loaded")
+            # Advance time by one original frame interval
+            current_time += self.original_frame_interval
+            frame_index += 1
+        
+        return target_frame_indices
+    
+    def _process_frame_into_tensor(self, frame, tensor_idx):
+        """Process frame directly into preallocated tensor (more efficient)"""
+        # Resize with no antialiasing (INTER_NEAREST)
+        resized = cv2.resize(frame, self.target_size, interpolation=cv2.INTER_NEAREST)
+        
+        # Convert BGR to RGB and normalize in one step
+        rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        
+        # Convert to tensor and normalize directly into preallocated tensor
+        # More efficient than creating intermediate tensors
+        frame_tensor = torch.from_numpy(rgb_frame).permute(2, 0, 1).float()
+        frame_tensor = frame_tensor / 127.5 - 1.0  # Normalize to [-1, 1]
+        
+        # Copy into preallocated tensor
+        self.frames_tensor[tensor_idx] = frame_tensor
     
     def _process_frame(self, frame):
         """Process a single frame: resize and convert to tensor"""
