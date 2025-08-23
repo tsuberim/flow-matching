@@ -3,3 +3,4 @@ videos
 *.pth
 data
 __pycache__
+output
