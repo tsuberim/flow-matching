@@ -68,18 +68,10 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     print(f"Using device: {device}")
     print(f"Batch size: {batch_size}")
     
-    # Load checkpoint metadata first to get wandb run ID
+    # Load checkpoint if exists (check for model file only)
     checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
-    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
     wandb_run_id = None
-    
-    try:
-        metadata = torch.load(metadata_path, map_location=device)
-        wandb_run_id = metadata.get('wandb_run_id')
-        print(f"Found existing wandb run ID: {wandb_run_id}")
-    except (FileNotFoundError, KeyError):
-        print("No existing checkpoint found, will create new wandb run")
-    
+
     # Initialize wandb (resume if we have a run ID)
     wandb.init(
         project=project_name,
@@ -149,7 +141,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     # Use ReduceLROnPlateau but step it every batch with shorter patience
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=200, factor=0.8)
     
-    # Load checkpoint if exists (metadata already loaded above for wandb)
+    # Load checkpoint if exists
     start_epoch = 0
     best_loss = float('inf')
     
@@ -253,21 +245,6 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
                 # Save checkpoint
                 model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
                 save_file(model_state, checkpoint_path)
-                
-                # Save training metadata
-                metadata = {
-                    'epoch': epoch,
-                    'batch': batch_idx,
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'loss': loss.item(),
-                    'best_loss': best_loss,
-                    'latent_dim': latent_dim,
-                    'beta': beta,
-                    'model_size': model_size,
-                    'wandb_run_id': wandb.run.id,
-                }
-                torch.save(metadata, metadata_path)
                 
                 # Log reconstruction images
                 vae.eval()
@@ -393,7 +370,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=20,
+        batch_size=16,
         lr=1e-5,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
