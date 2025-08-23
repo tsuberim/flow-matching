@@ -174,37 +174,37 @@ def train_vae_ddp(rank, world_size, epochs=100, batch_size=32, lr=1e-3, beta=1.0
         
         optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
         scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
-    
-    # Load checkpoint if exists
-    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
-    metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
-    start_epoch = 0
-    best_loss = float('inf')
-    
-    try:
-        # Load model weights from safetensors
-        model_state = load_file(checkpoint_path)
         
-        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
-        if any(key.startswith('module.') for key in model_state.keys()):
-            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+        # Load checkpoint if exists
+        checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
+        metadata_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_metadata.pth'
+        start_epoch = 0
+        best_loss = float('inf')
         
-        vae.load_state_dict(model_state)
+        try:
+            # Load model weights from safetensors
+            model_state = load_file(checkpoint_path)
+            
+            # Remove 'module.' prefix if loading DataParallel weights to single GPU model
+            if any(key.startswith('module.') for key in model_state.keys()):
+                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            
+            vae.load_state_dict(model_state)
+            
+            # Load training metadata from regular torch file
+            metadata = torch.load(metadata_path, map_location=device)
+            optimizer.load_state_dict(metadata['optimizer_state_dict'])
+            if 'scheduler_state_dict' in metadata:
+                scheduler.load_state_dict(metadata['scheduler_state_dict'])
+            start_epoch = metadata['epoch'] + 1
+            best_loss = metadata.get('best_loss', float('inf'))
+            if rank == 0:
+                print(f"Loaded checkpoint from epoch {metadata['epoch']}")
+                print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
+        except (FileNotFoundError, KeyError) as e:
+            if rank == 0:
+                print(f"No checkpoint found, starting from scratch")
         
-        # Load training metadata from regular torch file
-        metadata = torch.load(metadata_path, map_location=device)
-        optimizer.load_state_dict(metadata['optimizer_state_dict'])
-        if 'scheduler_state_dict' in metadata:
-            scheduler.load_state_dict(metadata['scheduler_state_dict'])
-        start_epoch = metadata['epoch'] + 1
-        best_loss = metadata.get('best_loss', float('inf'))
-        if rank == 0:
-            print(f"Loaded checkpoint from epoch {metadata['epoch']}")
-            print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
-    except (FileNotFoundError, KeyError) as e:
-        if rank == 0:
-            print(f"No checkpoint found, starting from scratch")
-    
         # Training loop
         if rank == 0:
             print(f"Starting VAE training for {epochs} epochs (from epoch {start_epoch})...")
