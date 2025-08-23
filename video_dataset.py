@@ -5,6 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
+import threading
 
 
 class VideoFrameDataset(Dataset):
@@ -39,9 +40,14 @@ class VideoFrameDataset(Dataset):
         self._create_frame_mapping()
         
         # Keep video capture open for lazy loading
+        # Set threading to avoid issues with CUDA/multi-processing
         self.cap = cv2.VideoCapture(self.video_path)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to prevent hanging
         if not self.cap.isOpened():
             raise ValueError(f"Could not open video file for lazy loading: {self.video_path}")
+        
+        # Thread lock for video capture (important for DataLoader workers)
+        self._cap_lock = threading.Lock()
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -164,9 +170,11 @@ class VideoFrameDataset(Dataset):
         
         real_frame_idx = self.frame_indices[mapped_idx]
         
-        # Set video position to the desired frame
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
-        ret, frame = self.cap.read()
+        # Use thread lock to prevent race conditions in multi-worker DataLoader
+        with self._cap_lock:
+            # Set video position to the desired frame
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
+            ret, frame = self.cap.read()
         
         if not ret:
             raise RuntimeError(f"Could not read frame {real_frame_idx} from video")
