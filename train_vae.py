@@ -395,7 +395,7 @@ if __name__ == "__main__":
         epochs=50,
         batch_size=21,
         lr=5e-6,
-        beta=0,  # Start with beta~=0 (no KL regularization)
+        beta=1e-7,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
         num_frames=100_000,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
