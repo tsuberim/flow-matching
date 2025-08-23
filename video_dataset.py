@@ -9,6 +9,8 @@ import multiprocessing as mp
 from functools import partial
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import h5py
+import hashlib
 
 
 class VideoFrameDataset(Dataset):
@@ -101,8 +103,74 @@ class VideoFrameDataset(Dataset):
         
         cap.release()
     
+    def _get_cache_path(self):
+        """Generate cache file path based on video settings"""
+        # Create unique hash based on video path and settings
+        settings_str = f"{self.video_path}_{self.target_size[0]}x{self.target_size[1]}_{self.target_fps}fps_{self.num_frames}"
+        cache_hash = hashlib.md5(settings_str.encode()).hexdigest()[:16]
+        
+        # Create cache directory if it doesn't exist
+        cache_dir = os.path.join(os.path.dirname(self.video_path), '.video_cache')
+        os.makedirs(cache_dir, exist_ok=True)
+        
+        return os.path.join(cache_dir, f"frames_{cache_hash}.h5")
+    
+    def _load_from_h5_cache(self, cache_path):
+        """Load frames from H5 cache if valid"""
+        try:
+            with h5py.File(cache_path, 'r') as f:
+                # Validate cache metadata
+                if (f.attrs['target_width'] == self.target_size[0] and
+                    f.attrs['target_height'] == self.target_size[1] and
+                    f.attrs['target_fps'] == self.target_fps and
+                    f.attrs['num_frames'] == self.num_frames and
+                    f.attrs['video_path'] == self.video_path):
+                    
+                    # Load frames dataset
+                    frames_data = f['frames'][:]
+                    self.frames_tensor = torch.from_numpy(frames_data).float()
+                    print(f"Loaded {len(self.frames_tensor)} frames from H5 cache!")
+                    return True
+                else:
+                    print("Cache metadata mismatch, regenerating...")
+                    return False
+        except (OSError, KeyError, ValueError) as e:
+            print(f"Cache loading failed: {e}, regenerating...")
+            return False
+    
+    def _save_to_h5_cache(self, cache_path):
+        """Save frames to H5 cache with metadata"""
+        try:
+            with h5py.File(cache_path, 'w') as f:
+                # Save frames data with compression
+                f.create_dataset('frames', data=self.frames_tensor.numpy(), 
+                               compression='gzip', compression_opts=1, shuffle=True)
+                
+                # Save metadata as attributes
+                f.attrs['target_width'] = self.target_size[0]
+                f.attrs['target_height'] = self.target_size[1]
+                f.attrs['target_fps'] = self.target_fps
+                f.attrs['num_frames'] = self.num_frames
+                f.attrs['video_path'] = self.video_path
+                f.attrs['total_frames'] = len(self.frames_tensor)
+                
+            print(f"Cached {len(self.frames_tensor)} frames to H5: {cache_path}")
+        except Exception as e:
+            print(f"Warning: Could not save H5 cache: {e}")
+            # Remove partial cache file
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+    
     def _preload_frames(self):
-        """Preload all frames into memory with optimized batch processing"""
+        """Preload frames with H5 caching and optimized batch processing"""
+        # Check for H5 cache first
+        cache_path = self._get_cache_path()
+        
+        if os.path.exists(cache_path):
+            if self._load_from_h5_cache(cache_path):
+                return  # Successfully loaded from cache
+        
+        print("Processing frames (will cache to H5)...")
         # Open video capture for preloading
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
@@ -201,6 +269,9 @@ class VideoFrameDataset(Dataset):
         print(f"Tensor shape: {self.frames_tensor.shape}")
         print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
         print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
+        
+        # Save to H5 cache for future runs
+        self._save_to_h5_cache(cache_path)
     
     def _compute_target_frame_indices(self):
         """Compute which frame indices we need based on time sampling"""

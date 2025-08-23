@@ -201,7 +201,6 @@ def vae_loss(vae, frames, beta=0.0, gamma=0.0):
     """
     t = frames.shape[1]
     input = rearrange(frames, 'b t c h w -> (b t) c h w')
-    print(f"Input shape: {input.shape}")
     reconstruction, mu, logvar = vae(input)
     reconstruction = rearrange(reconstruction, '(b t) c h w -> b t c h w', t=t)
     mu = rearrange(mu, '(b t) c h w -> b t c h w', t=t)
