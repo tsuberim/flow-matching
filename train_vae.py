@@ -119,10 +119,10 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
     # Use batch_size per GPU, DataParallel will handle splitting across GPUs
-    # Set num_workers=0 for CUDA to avoid hanging issues
-    num_workers = 0 if torch.cuda.is_available() else min(4, os.cpu_count())
+    # Now safe to use multiple workers with per-thread video captures
+    num_workers = min(4, os.cpu_count())
     dataloader = DataLoader(dataset, batch_size=effective_batch_size, shuffle=True, num_workers=num_workers)
-    print(f"Using {num_workers} DataLoader workers (CUDA detected: {torch.cuda.is_available()})")
+    print(f"Using {num_workers} DataLoader workers with per-thread video captures")
     
     print(f"Dataset size: {len(dataset)} frames")
     print(f"Number of batches: {len(dataloader)}")

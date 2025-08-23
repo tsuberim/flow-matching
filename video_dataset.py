@@ -39,15 +39,9 @@ class VideoFrameDataset(Dataset):
         print("Computing frame mapping for lazy loading...")
         self._create_frame_mapping()
         
-        # Keep video capture open for lazy loading
-        # Set threading to avoid issues with CUDA/multi-processing
-        self.cap = cv2.VideoCapture(self.video_path)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to prevent hanging
-        if not self.cap.isOpened():
-            raise ValueError(f"Could not open video file for lazy loading: {self.video_path}")
-        
-        # Thread lock for video capture (important for DataLoader workers)
-        self._cap_lock = threading.Lock()
+        # Store video path for per-thread video capture creation
+        # Each DataLoader worker will create its own cv2.VideoCapture instance
+        self._thread_local = threading.local()
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -163,6 +157,16 @@ class VideoFrameDataset(Dataset):
         
         return tensor
     
+    def _get_thread_video_cap(self):
+        """Get or create a video capture instance for the current thread"""
+        if not hasattr(self._thread_local, 'cap'):
+            # Create a new video capture for this thread
+            self._thread_local.cap = cv2.VideoCapture(self.video_path)
+            self._thread_local.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not self._thread_local.cap.isOpened():
+                raise ValueError(f"Could not open video file in thread: {self.video_path}")
+        return self._thread_local.cap
+    
     def _load_frame_by_index(self, mapped_idx):
         """Load a single frame by its mapped index"""
         if mapped_idx >= len(self.frame_indices):
@@ -170,11 +174,12 @@ class VideoFrameDataset(Dataset):
         
         real_frame_idx = self.frame_indices[mapped_idx]
         
-        # Use thread lock to prevent race conditions in multi-worker DataLoader
-        with self._cap_lock:
-            # Set video position to the desired frame
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
-            ret, frame = self.cap.read()
+        # Get thread-local video capture (no locks needed!)
+        cap = self._get_thread_video_cap()
+        
+        # Set video position to the desired frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
+        ret, frame = cap.read()
         
         if not ret:
             raise RuntimeError(f"Could not read frame {real_frame_idx} from video")
@@ -199,9 +204,14 @@ class VideoFrameDataset(Dataset):
         return torch.stack(sequence, dim=0)
     
     def __del__(self):
-        """Cleanup: release video capture when dataset is destroyed"""
-        if hasattr(self, 'cap') and self.cap is not None:
-            self.cap.release()
+        """Cleanup: release thread-local video captures when dataset is destroyed"""
+        # Note: thread-local video captures will be automatically cleaned up
+        # when threads end, but we can try to clean up the main thread one
+        if hasattr(self, '_thread_local') and hasattr(self._thread_local, 'cap'):
+            try:
+                self._thread_local.cap.release()
+            except:
+                pass
 
 
 def find_video_file(video_dir='./videos'):
