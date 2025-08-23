@@ -405,7 +405,7 @@ def decode_sequences_and_visualize(latent_sequences, vae, save_path='decoded_seq
     return decoded_sequences
 
 
-def save_sequences_as_videos(decoded_sequences, output_dir='./output', fps=8):
+def save_sequences_as_videos(decoded_sequences, output_dir='./output', fps=12):
     """
     Save decoded sequences as MP4 videos
     
@@ -555,7 +555,7 @@ def main():
     save_sequences_as_videos(
         decoded_sequences=decoded_sequences,
         output_dir='./output',
-        fps=8  # Slower playback for better viewing
+        fps=12  # Match dataset frame rate
     )
     
     print(f"\n✅ Generation complete!")
