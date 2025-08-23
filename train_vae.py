@@ -15,7 +15,7 @@ from utils import get_device
 
 def setup_multi_gpu(model, device):
     """
-    Setup model for multi-GPU training with enhanced stability
+    Setup model for multi-GPU training avoiding NCCL issues
     
     Args:
         model: PyTorch model
@@ -28,7 +28,7 @@ def setup_multi_gpu(model, device):
     num_gpus = torch.cuda.device_count()
     
     if num_gpus > 1:
-        print(f"Setting up {num_gpus} GPUs for training")
+        print(f"Setting up {num_gpus} GPUs for training (avoiding NCCL)")
         
         # Move model to device first
         model = model.to(device)
@@ -36,24 +36,20 @@ def setup_multi_gpu(model, device):
         # Clear GPU cache before DataParallel
         torch.cuda.empty_cache()
         
-        # Wrap with DataParallel with specific device IDs
-        device_ids = list(range(num_gpus))
-        model = torch.nn.DataParallel(model, device_ids=device_ids, output_device=0)
+        # Disable NCCL backend to avoid communication errors
+        import os
+        os.environ['NCCL_P2P_DISABLE'] = '1'
+        os.environ['NCCL_IB_DISABLE'] = '1'
         
-        # Set CUDA synchronization for stability
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cudnn.deterministic = False
+        # Use simple DataParallel without explicit device_ids to let PyTorch auto-detect
+        model = torch.nn.DataParallel(model)
         
-        # Force CUDA context initialization on all devices
-        for i in range(num_gpus):
-            with torch.cuda.device(i):
-                torch.cuda.empty_cache()
-                # Create a small tensor to initialize CUDA context
-                _ = torch.zeros(1).cuda()
+        # Set CUDA settings for stability
+        torch.backends.cudnn.benchmark = False  # Disable for stability
+        torch.backends.cudnn.deterministic = True
         
-        print(f"✅ DataParallel setup complete on {num_gpus} GPUs")
+        print(f"✅ DataParallel setup complete on {num_gpus} GPUs (NCCL disabled)")
         print(f"Primary device: {device}")
-        print(f"GPU devices: {list(range(num_gpus))}")
         
     else:
         print(f"Using single GPU/device: {device}")
