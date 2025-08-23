@@ -13,26 +13,39 @@ from video_dataset import create_video_dataset
 from utils import get_device
 
 
-def setup_single_gpu(model, device):
+def setup_gpu(model, device):
     """
-    Setup model for single GPU training
+    Setup model for GPU training (single or multi)
     
     Args:
         model: PyTorch model
         device: primary device
     
     Returns:
-        model: model on single GPU
-        num_gpus: 1
+        model: model on GPU(s)
+        num_gpus: number of GPUs used
     """
-    print(f"Using single GPU: {device}")
-    model = model.to(device)
+    num_gpus = torch.cuda.device_count()
     
-    # Optimize for single GPU
-    torch.backends.cudnn.benchmark = True
+    if num_gpus > 1:
+        print(f"Using {num_gpus} GPUs with DataParallel")
+        model = model.to(device)
+        
+        # Disable NCCL optimizations that cause issues
+        import os
+        os.environ['NCCL_P2P_DISABLE'] = '1'
+        os.environ['NCCL_IB_DISABLE'] = '1'
+        
+        model = torch.nn.DataParallel(model)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+    else:
+        print(f"Using single GPU: {device}")
+        model = model.to(device)
+        torch.backends.cudnn.benchmark = True
+    
     torch.cuda.empty_cache()
-    
-    return model, 1
+    return model, num_gpus
 
 
 def log_reconstruction_to_wandb(original, reconstruction, epoch):
@@ -126,14 +139,14 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         dataloader_kwargs['timeout'] = 60
     
     dataloader = DataLoader(**dataloader_kwargs)
-    print(f"Using {num_workers} DataLoader workers for single GPU training")
+    print(f"Using {num_workers} DataLoader workers")
     
     print(f"Dataset size: {len(dataset)} frames")
     print(f"Number of batches: {len(dataloader)}")
     
-    # Create VAE model and setup for single GPU
+    # Create VAE model and setup for GPU(s)
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, num_gpus_used = setup_single_gpu(vae, device)
+    vae, num_gpus_used = setup_gpu(vae, device)
     
     # Scale learning rate by number of GPUs (common practice)
     scaled_lr = lr * num_gpus_used
@@ -275,8 +288,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         vae.train()
         
         # Save checkpoint every epoch using safetensors
-        # Save model weights (single GPU)
-        model_state = vae.state_dict()
+        # Save model weights (handle DataParallel)
+        model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
         save_file(model_state, checkpoint_path)
         
         # Save training metadata
@@ -295,7 +308,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     # Final model save using safetensors
     final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
-    final_model_state = vae.state_dict()
+    final_model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
     save_file(final_model_state, final_model_path)
     print(f"Final model saved as '{final_model_path}'")
     
@@ -318,7 +331,7 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     
     # Load trained VAE
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, _ = setup_single_gpu(vae, device)
+    vae, _ = setup_gpu(vae, device)
     
     try:
         model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
