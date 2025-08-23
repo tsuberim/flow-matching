@@ -220,8 +220,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Backward pass
             loss.backward()
 
-            # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+            # Calculate and clip gradients
+            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
 
             optimizer.step()
             
@@ -252,6 +252,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                 "batch_sim_loss": sim_loss.item(),
                 "batch_diff_loss": diff_loss.item(),
                 "learning_rate": optimizer.param_groups[0]['lr'],
+                "grad_norm": grad_norm.mean().item(),
                 "step": epoch * len(dataloader) + batch_idx
             })
             
