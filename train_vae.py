@@ -168,18 +168,10 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Loading single model weights into DataParallel
             model_state = {f'module.{k}': v for k, v in model_state.items()}
         
+        print(f"Loaded checkpoint")
         vae.load_state_dict(model_state)
-        
-        # Use already loaded metadata
-        optimizer.load_state_dict(metadata['optimizer_state_dict'])
-        if 'scheduler_state_dict' in metadata:
-            scheduler.load_state_dict(metadata['scheduler_state_dict'])
-        start_epoch = metadata['epoch'] + 1
-        best_loss = metadata.get('best_loss', float('inf'))
-        print(f"Loaded checkpoint from epoch {metadata['epoch']}")
-        print(f"Resuming from epoch {start_epoch}, best loss: {best_loss:.4f}")
     except (FileNotFoundError, KeyError) as e:
-        print(f"Checkpoint metadata found but model loading failed: {e}")
+        print(f"Checkpoint loading failed: {e}")
     except Exception as e:
         print(f"Error loading checkpoint: {e}")
         print("Starting from scratch instead...")
