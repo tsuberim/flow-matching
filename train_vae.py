@@ -179,17 +179,16 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                 'Diff': f'{diff_loss.item():.4f}'
             })
             
-            # Log metrics to wandb every few batches
-            if batch_idx % 10 == 0:
-                wandb.log({
-                    "batch_loss": loss.item(),
-                    "batch_recon_loss": recon_loss.item(),
-                    "batch_kl_loss": kl_loss.item(),
-                    "batch_sim_loss": sim_loss.item(),
-                    "batch_diff_loss": diff_loss.item(),
-                    "learning_rate": optimizer.param_groups[0]['lr'],
-                    "step": epoch * len(dataloader) + batch_idx
-                })
+            # Log metrics to wandb every batch
+            wandb.log({
+                "batch_loss": loss.item(),
+                "batch_recon_loss": recon_loss.item(),
+                "batch_kl_loss": kl_loss.item(),
+                "batch_sim_loss": sim_loss.item(),
+                "batch_diff_loss": diff_loss.item(),
+                "learning_rate": optimizer.param_groups[0]['lr'],
+                "step": epoch * len(dataloader) + batch_idx
+            })
             
             # Checkpoint and log images every 100 batches
             if batch_idx % 100 == 0:
