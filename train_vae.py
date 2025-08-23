@@ -144,19 +144,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             "num_gpus": 1
         }, allow_val_change=True)
     
-    # Set up optimizer and scheduler with warmup for large models
-    if isinstance(vae, torch.nn.DataParallel):
-        model_size_check = vae.module.model_size
-    else:
-        model_size_check = vae.model_size
-    
-    if model_size_check >= 4:
-        # Use much smaller learning rate for very large models
-        warmup_lr = scaled_lr * 0.01  # Start with 1% of target LR
-        print(f"Large model detected, using warmup LR: {warmup_lr}")
-        optimizer = optim.Adam(vae.parameters(), lr=warmup_lr)
-    else:
-        optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
+    optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
     
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
     
