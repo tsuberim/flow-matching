@@ -37,6 +37,8 @@ def setup_gpu(model, device):
         os.environ['NCCL_IB_DISABLE'] = '1'
         
         model = torch.nn.DataParallel(model)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     else:
         print(f"Using single GPU: {device}")
         model = model.to(device)
