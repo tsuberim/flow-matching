@@ -147,7 +147,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
     
     # Use ReduceLROnPlateau but step it every batch with shorter patience
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=500, factor=0.8, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=200, factor=0.8, verbose=True)
     
     # Load checkpoint if exists (metadata already loaded above for wandb)
     start_epoch = 0
