@@ -146,7 +146,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
     
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+    # Use ReduceLROnPlateau but step it every batch with shorter patience
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=500, factor=0.8, verbose=True)
     
     # Load checkpoint if exists (metadata already loaded above for wandb)
     start_epoch = 0
@@ -226,6 +227,9 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
 
             optimizer.step()
+            
+            # Step scheduler after each batch with current loss
+            scheduler.step(loss.item())
             
             # Accumulate losses
             total_loss += loss.item()
@@ -315,8 +319,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             "avg_diff_loss": avg_diff_loss
         })
         
-        # Step scheduler
-        scheduler.step(avg_loss)
+        # Scheduler now steps per batch, not per epoch
         
         # Update best loss
         if avg_loss < best_loss:
