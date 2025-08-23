@@ -17,67 +17,82 @@ class VideoVAE(nn.Module):
         self.latent_dim = latent_dim
         self.model_size = model_size
         
-        # Encoder: 320x180 -> 32x18 (exactly 10x reduction in each dim)
+        # Improved Encoder with BatchNorm and more layers
         self.encoder = nn.Sequential(
             # 320x180 -> 160x90
             nn.Conv2d(3, 32 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
-            
+
             # 160x90 -> 80x45
             nn.Conv2d(32 * model_size, 64 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
-            
-            # 80x45 -> 40x23 (45//2 = 22, need +1 for 23 due to padding)
+
+            # 80x45 -> 40x23
             nn.Conv2d(64 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-            
-            # 40x23 -> 20x12 (23//2 = 11, need +1 for 12 due to padding)  
+
+            # Additional layer 1: 40x23 -> 20x12
             nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-            
-            # 20x12 -> 10x6
+
+            # Additional layer 2: 20x12 -> 10x6
             nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128 * model_size),
+            nn.ReLU(),
+
+            # Final layer: 10x6 -> 5x3
+            nn.Conv2d(128 * model_size, 256 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(256 * model_size),
             nn.ReLU(),
         )
+
+        # Use bilinear upsampling instead of adaptive pooling for MPS compatibility
+        self.encoder_pool = nn.Upsample(size=(18, 32), mode='bilinear', align_corners=False)
         
-        # Adaptive pool to get exactly 32x18 (upsampling from 10x6)
-        self.encoder_pool = nn.Upsample(size=(18, 32), mode='nearest')
-        
-        # Final conv layers for mu and logvar
-        self.fc_mu = nn.Conv2d(128 * model_size, latent_dim, 1)
-        self.fc_logvar = nn.Conv2d(128 * model_size, latent_dim, 1)
-        
-        # Decoder: 18x32x<latent_dim> -> 180x320x3
-        self.decoder_input = nn.Conv2d(latent_dim, 128 * model_size, 1)
-        
-        # First downsample to match encoder path
-        self.decoder_downsample = nn.Upsample(size=(6, 10), mode='nearest')  # 18x32 -> 6x10
-        
+        # Final conv layers for mu and logvar (updated for 256 channels)
+        self.fc_mu = nn.Conv2d(256 * model_size, latent_dim, 1)
+        self.fc_logvar = nn.Conv2d(256 * model_size, latent_dim, 1)
+
+        # Improved Decoder with BatchNorm
+        self.decoder_input = nn.Conv2d(latent_dim, 256 * model_size, 1)
+
         self.decoder = nn.Sequential(
-            # 6x10 -> 12x20
-            nn.ConvTranspose2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            # 18x32 -> 36x64
+            nn.ConvTranspose2d(256 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-            
-            # 12x20 -> 23x40 (note: will be slightly off, need to crop)
+
+            # 36x64 -> 72x128
             nn.ConvTranspose2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-            
-            # 23x40 -> 45x80
+
+            # 72x128 -> 144x256
             nn.ConvTranspose2d(128 * model_size, 64 * model_size, 4, stride=2, padding=1),
+            nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
-            
-            # 45x80 -> 90x160
-            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=2, padding=1),
+
+            # 144x256 -> adjust to get closer to target size
+            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=1, padding=2),
+            nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
-            
-            # 90x160 -> 180x320
-            nn.ConvTranspose2d(32 * model_size, 16 * model_size, 4, stride=2, padding=1),
+
+            # Final refinement
+            nn.Conv2d(32 * model_size, 16 * model_size, 3, padding=1),
+            nn.BatchNorm2d(16 * model_size),
             nn.ReLU(),
-            
-            # Final layer
+
+            # Output layer
             nn.Conv2d(16 * model_size, 3, 3, padding=1),
-            nn.Tanh()  # Output in [-1, 1] to match input normalization
+            nn.Tanh()
         )
+
+        # Add final upsampling to ensure exact output size
+        self.final_upsample = nn.Upsample(size=(180, 320), mode='bilinear', align_corners=False)
         
         # Initialize weights properly
         self._initialize_weights()
@@ -89,24 +104,22 @@ class VideoVAE(nn.Module):
         print(f"Latent space: 32x18x{latent_dim} = {32*18*latent_dim:,} values")
     
     def _initialize_weights(self):
-        """Initialize weights for numerical stability"""
+        """Initialize weights using Kaiming initialization"""
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-                # Much smaller initialization for large models
-                if self.model_size >= 4:
-                    # For very large models, use much smaller weights
-                    nn.init.normal_(m.weight, 0, 0.01)
-                else:
-                    # Standard Xavier for smaller models
-                    nn.init.xavier_normal_(m.weight, gain=0.1)  # Reduced gain
+                # Kaiming initialization for ReLU activations
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-        
-        # Initialize output layers with very small weights
-        nn.init.normal_(self.fc_mu.weight, 0, 0.001)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+        # Initialize output layers with Kaiming as well
+        nn.init.kaiming_normal_(self.fc_mu.weight, mode='fan_out', nonlinearity='linear')
         nn.init.constant_(self.fc_mu.bias, 0)
-        nn.init.normal_(self.fc_logvar.weight, 0, 0.001)
-        nn.init.constant_(self.fc_logvar.bias, -10)  # Start with very small variance
+        nn.init.kaiming_normal_(self.fc_logvar.weight, mode='fan_out', nonlinearity='linear')
+        nn.init.constant_(self.fc_logvar.bias, -5)  # Moderate initial variance
         
     def encode(self, x):
         """
@@ -140,14 +153,9 @@ class VideoVAE(nn.Module):
         Returns:
             reconstruction: [B, 3, 180, 320] reconstructed frames
         """
-        h = self.decoder_input(z)  # [B, 128, 18, 32]
-        h = self.decoder_downsample(h)  # [B, 128, 6, 10]
-        reconstruction = self.decoder(h)  # [B, 3, 180, 320]
-        
-        # Ensure exact output size
-        if reconstruction.shape[-2:] != (180, 320):
-            reconstruction = F.interpolate(reconstruction, size=(180, 320), mode='bilinear', align_corners=False)
-        
+        h = self.decoder_input(z)  # [B, 256, 18, 32]
+        reconstruction = self.decoder(h)  # [B, 3, ~144, ~256]
+        reconstruction = self.final_upsample(reconstruction)  # [B, 3, 180, 320]
         return reconstruction
     
     def forward(self, x):
@@ -181,7 +189,7 @@ class VideoVAE(nn.Module):
         return samples
 
 
-def vae_loss(vae, frames, beta=0.0, gamma=1e-5):
+def vae_loss(vae, frames, beta=0.0, gamma=0.0):
     """
     VAE loss function
     Args:
@@ -236,7 +244,7 @@ def create_video_vae(latent_dim=8, model_size=1):
 if __name__ == "__main__":
     # Test the VAE
     device = get_device()
-    vae = create_video_vae(latent_dim=8, model_size=1).to(device)
+    vae = create_video_vae(latent_dim=8, model_size=2).to(device)
     
     # Test with dummy input
     batch_size = 4
