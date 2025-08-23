@@ -7,3 +7,5 @@ tqdm
 yt-dlp
 opencv-python
 numpy
+wandb
+safetensors
