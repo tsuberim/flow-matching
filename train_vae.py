@@ -216,13 +216,19 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                 if batch_idx == 0 and epoch == 0:
                     print("✅ First batch processing - DataLoader working correctly!")
                 
+                print(f"Moving batch to device: {device}")
                 frames = frames.to(device)
+                print(f"✅ Batch moved to device. Shape: {frames.shape}")
                 
                 # Zero gradients
+                print("Zeroing gradients...")
                 optimizer.zero_grad()
+                print("✅ Gradients zeroed")
                 
                 # Compute loss
+                print("Computing VAE loss...")
                 loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
+                print(f"✅ Loss computed: {loss.item():.4f}")
                 
                 # Backward pass
                 loss.backward()
@@ -410,7 +416,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=16,  # Adjust based on GPU memory
+        batch_size=1,  # Reduced for debugging hanging issue
         lr=1e-3,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
