@@ -144,7 +144,14 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     # Create VAE model and setup for multi-GPU
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, num_gpus_used = setup_multi_gpu(vae, device)
+    
+    # Temporarily disable multi-GPU for debugging
+    print("🔧 DEBUGGING: Disabling multi-GPU setup")
+    vae = vae.to(device)
+    num_gpus_used = 1
+    print(f"Using single GPU for debugging: {device}")
+    
+    # vae, num_gpus_used = setup_multi_gpu(vae, device)  # Re-enable later
     
     # Scale learning rate by number of GPUs (common practice)
     scaled_lr = lr * num_gpus_used
@@ -225,10 +232,22 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
                 optimizer.zero_grad()
                 print("✅ Gradients zeroed")
                 
+                # Check GPU memory before forward pass
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()  # Clear cache
+                    memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+                    print(f"GPU memory before forward pass: {memory_allocated:.2f} GB")
+                
                 # Compute loss
                 print("Computing VAE loss...")
-                loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
-                print(f"✅ Loss computed: {loss.item():.4f}")
+                try:
+                    loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
+                    print(f"✅ Loss computed: {loss.item():.4f}")
+                except RuntimeError as e:
+                    print(f"❌ CUDA Error during forward pass: {e}")
+                    if "out of memory" in str(e):
+                        print("💡 Try reducing batch_size or model_size")
+                    raise
                 
                 # Backward pass
                 loss.backward()
