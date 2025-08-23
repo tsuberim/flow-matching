@@ -13,49 +13,26 @@ from video_dataset import create_video_dataset
 from utils import get_device
 
 
-def setup_multi_gpu(model, device):
+def setup_single_gpu(model, device):
     """
-    Setup model for multi-GPU training avoiding NCCL issues
+    Setup model for single GPU training
     
     Args:
         model: PyTorch model
         device: primary device
     
     Returns:
-        model: wrapped model for multi-GPU
-        num_gpus: number of GPUs being used
+        model: model on single GPU
+        num_gpus: 1
     """
-    num_gpus = torch.cuda.device_count()
+    print(f"Using single GPU: {device}")
+    model = model.to(device)
     
-    if num_gpus > 1:
-        print(f"Setting up {num_gpus} GPUs for training (avoiding NCCL)")
-        
-        # Move model to device first
-        model = model.to(device)
-        
-        # Clear GPU cache before DataParallel
-        torch.cuda.empty_cache()
-        
-        # Disable NCCL backend to avoid communication errors
-        import os
-        os.environ['NCCL_P2P_DISABLE'] = '1'
-        os.environ['NCCL_IB_DISABLE'] = '1'
-        
-        # Use simple DataParallel without explicit device_ids to let PyTorch auto-detect
-        model = torch.nn.DataParallel(model)
-        
-        # Set CUDA settings for stability
-        torch.backends.cudnn.benchmark = False  # Disable for stability
-        torch.backends.cudnn.deterministic = True
-        
-        print(f"✅ DataParallel setup complete on {num_gpus} GPUs (NCCL disabled)")
-        print(f"Primary device: {device}")
-        
-    else:
-        print(f"Using single GPU/device: {device}")
-        model = model.to(device)
+    # Optimize for single GPU
+    torch.backends.cudnn.benchmark = True
+    torch.cuda.empty_cache()
     
-    return model, num_gpus
+    return model, 1
 
 
 def log_reconstruction_to_wandb(original, reconstruction, epoch):
@@ -108,23 +85,17 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     """
     device = get_device()
     
-    # Check for multiple GPUs and adjust batch size
-    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    effective_batch_size = batch_size * num_gpus
-    
+    # Single GPU training setup
     print(f"Device: {device}")
-    print(f"Number of GPUs available: {num_gpus}")
-    print(f"Batch size per GPU: {batch_size}")
-    print(f"Effective batch size: {effective_batch_size}")
+    print(f"Batch size: {batch_size}")
+    effective_batch_size = batch_size
     
     # Initialize wandb
     wandb.init(
         project=project_name,
         config={
             "epochs": epochs,
-            "batch_size_per_gpu": batch_size,
-            "effective_batch_size": effective_batch_size,
-            "num_gpus": num_gpus,
+            "batch_size": batch_size,
             "learning_rate": lr,
             "beta": beta,
             "latent_dim": latent_dim,
@@ -137,10 +108,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     # Create dataset and dataloader
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
-    # Use batch_size per GPU, DataParallel will handle splitting across GPUs
-    # Enable multiple workers for better performance with multi-GPU
-    available_gpus = torch.cuda.device_count()
-    num_workers = min(4, os.cpu_count()) if available_gpus > 1 else 2
+    # Single GPU training - use moderate number of workers
+    num_workers = min(2, os.cpu_count())
     
     # Configure DataLoader based on worker count
     dataloader_kwargs = {
@@ -157,14 +126,14 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         dataloader_kwargs['timeout'] = 60
     
     dataloader = DataLoader(**dataloader_kwargs)
-    print(f"Using {num_workers} DataLoader workers for multi-GPU training")
+    print(f"Using {num_workers} DataLoader workers for single GPU training")
     
     print(f"Dataset size: {len(dataset)} frames")
     print(f"Number of batches: {len(dataloader)}")
     
-    # Create VAE model and setup for multi-GPU
+    # Create VAE model and setup for single GPU
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, num_gpus_used = setup_multi_gpu(vae, device)
+    vae, num_gpus_used = setup_single_gpu(vae, device)
     
     # Scale learning rate by number of GPUs (common practice)
     scaled_lr = lr * num_gpus_used
@@ -183,17 +152,11 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         # Load model weights from safetensors
         model_state = load_file(checkpoint_path)
         
-        # Handle DataParallel model loading
-        if isinstance(vae, torch.nn.DataParallel):
-            # Remove 'module.' prefix if loading non-DataParallel weights to DataParallel model
-            if not any(key.startswith('module.') for key in model_state.keys()):
-                model_state = {f'module.{k}': v for k, v in model_state.items()}
-            vae.load_state_dict(model_state)
-        else:
-            # Remove 'module.' prefix if loading DataParallel weights to non-DataParallel model
-            if any(key.startswith('module.') for key in model_state.keys()):
-                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
-            vae.load_state_dict(model_state)
+        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
+        if any(key.startswith('module.') for key in model_state.keys()):
+            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+        
+        vae.load_state_dict(model_state)
         
         # Load training metadata from regular torch file
         metadata = torch.load(metadata_path, map_location=device)
@@ -351,12 +314,8 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         vae.train()
         
         # Save checkpoint every epoch using safetensors
-        # Save model weights (handle DataParallel)
-        if isinstance(vae, torch.nn.DataParallel):
-            # Save the underlying model without 'module.' prefix
-            model_state = vae.module.state_dict()
-        else:
-            model_state = vae.state_dict()
+        # Save model weights (single GPU)
+        model_state = vae.state_dict()
         save_file(model_state, checkpoint_path)
         
         # Save training metadata
@@ -375,11 +334,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     
     # Final model save using safetensors
     final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
-    if isinstance(vae, torch.nn.DataParallel):
-        # Save the underlying model without 'module.' prefix
-        final_model_state = vae.module.state_dict()
-    else:
-        final_model_state = vae.state_dict()
+    final_model_state = vae.state_dict()
     save_file(final_model_state, final_model_path)
     print(f"Final model saved as '{final_model_path}'")
     
@@ -402,23 +357,16 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     
     # Load trained VAE
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    vae, _ = setup_multi_gpu(vae, device)
+    vae, _ = setup_single_gpu(vae, device)
     
     try:
         model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
         
-        # Handle DataParallel model loading
-        if isinstance(vae, torch.nn.DataParallel):
-            # Add 'module.' prefix if needed
-            if not any(key.startswith('module.') for key in model_state.keys()):
-                model_state = {f'module.{k}': v for k, v in model_state.items()}
-            vae.load_state_dict(model_state)
-        else:
-            # Remove 'module.' prefix if needed
-            if any(key.startswith('module.') for key in model_state.keys()):
-                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
-            vae.load_state_dict(model_state)
+        # Remove 'module.' prefix if loading DataParallel weights to single GPU model
+        if any(key.startswith('module.') for key in model_state.keys()):
+            model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
         
+        vae.load_state_dict(model_state)
         print(f"Loaded trained VAE model")
     except FileNotFoundError:
         print(f"No trained model found, using random weights")
