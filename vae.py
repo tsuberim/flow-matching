@@ -79,11 +79,27 @@ class VideoVAE(nn.Module):
             nn.Tanh()  # Output in [-1, 1] to match input normalization
         )
         
+        # Initialize weights properly
+        self._initialize_weights()
+        
         # Count parameters
         total_params = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"VAE initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
         print(f"Latent space: 32x18x{latent_dim} = {32*18*latent_dim:,} values")
+    
+    def _initialize_weights(self):
+        """Initialize weights for numerical stability"""
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
+                # Xavier initialization for better gradient flow
+                nn.init.xavier_normal_(m.weight, gain=1.0)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        
+        # Initialize logvar output to small values to prevent exp() overflow
+        nn.init.constant_(self.fc_logvar.weight, 0)
+        nn.init.constant_(self.fc_logvar.bias, -5)  # Start with small variance
         
     def encode(self, x):
         """

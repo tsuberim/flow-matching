@@ -223,7 +223,11 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             loss.backward()
             
             # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+            
+            # Monitor gradient norms for debugging
+            if batch_idx % 100 == 0:
+                print(f"Gradient norm: {grad_norm:.4f}")
             
             optimizer.step()
             
@@ -400,7 +404,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=36,
+        batch_size=32,
         lr=1e-4,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
