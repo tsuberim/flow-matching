@@ -386,7 +386,7 @@ if __name__ == "__main__":
     trained_vae = train_vae(
         epochs=50,
         batch_size=40,
-        lr=1e-3,
+        lr=1e-4,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
         num_frames=10000,  # Use subset for faster training
