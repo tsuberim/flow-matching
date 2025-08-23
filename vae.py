@@ -102,8 +102,10 @@ class VideoVAE(nn.Module):
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
-        """Reparameterization trick"""
-        std = torch.exp(0.5 * logvar)
+        """Reparameterization trick with numerical stability"""
+        # Clamp logvar to prevent extreme values
+        logvar_clamped = torch.clamp(logvar, min=-20, max=20)
+        std = torch.exp(0.5 * logvar_clamped)
         eps = torch.randn_like(std)
         return mu + eps * std
     
@@ -193,8 +195,9 @@ def vae_loss(vae, frames, beta=1e-5, gamma=0.01):
             sim_loss += weight * F.mse_loss(mu[:,t1], mu[:,t2], reduction='mean')
     sim_loss = gamma * sim_loss / (t * t)  # Normalize by number of pairs
 
-    # KL divergence loss
-    kl_loss = -0.5 * beta * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    # KL divergence loss with clamping to prevent numerical instability
+    logvar_clamped = torch.clamp(logvar, min=-20, max=20)  # Prevent extreme values
+    kl_loss = -0.5 * beta * torch.mean(1 + logvar_clamped - mu.pow(2) - logvar_clamped.exp())
     
     # Total loss
     total_loss = recon_loss + kl_loss + sim_loss + diff_loss

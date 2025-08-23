@@ -133,7 +133,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             "effective_batch_size": effective_batch_size,
             "scaled_learning_rate": scaled_lr,
             "num_gpus": num_gpus
-        })
+        }, allow_val_change=True)
     else:
         print(f"Using single device: {device}")
         scaled_lr = lr
@@ -142,7 +142,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             "effective_batch_size": batch_size,
             "scaled_learning_rate": scaled_lr,
             "num_gpus": 1
-        })
+        }, allow_val_change=True)
     
     # Set up optimizer and scheduler
     optimizer = optim.Adam(vae.parameters(), lr=scaled_lr)
@@ -208,8 +208,23 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
             # Compute loss
             loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
             
+            # Check for NaN/inf in loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"NaN/Inf detected at epoch {epoch+1}, batch {batch_idx}")
+                print(f"  Loss: {loss.item()}")
+                print(f"  Recon: {recon_loss.item()}")
+                print(f"  KL: {kl_loss.item()}")
+                print(f"  Sim: {sim_loss.item()}")
+                print(f"  Diff: {diff_loss.item()}")
+                print(f"  Frames min/max: {frames.min().item():.4f}/{frames.max().item():.4f}")
+                continue  # Skip this batch
+            
             # Backward pass
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
+            
             optimizer.step()
             
             # Accumulate losses
@@ -385,11 +400,11 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=32,
-        lr=1e-3,
+        batch_size=36,
+        lr=1e-4,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
-        num_frames=None,  # Use subset for faster training
+        num_frames=10000,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
         model_size=4,  # Model size multiplier
         project_name="video-vae"
