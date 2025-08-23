@@ -38,9 +38,8 @@ class VideoFrameDataset(Dataset):
         print("Computing frame mapping for lazy loading...")
         self._create_frame_mapping()
         
-        # Store process ID to detect when we're in a new process (DataLoader worker)
-        self._current_process_id = os.getpid()
-        self._process_video_cap = None
+        # Single video capture instance (no multiprocessing)
+        self._video_cap = None
     
     def _analyze_video(self):
         """Analyze video and determine frame range to extract"""
@@ -156,30 +155,20 @@ class VideoFrameDataset(Dataset):
         
         return tensor
     
-    def _get_process_video_cap(self):
-        """Get or create a video capture for the current process"""
-        current_pid = os.getpid()
-        
-        # Check if we're in a new process or need to create a new capture
-        if (self._process_video_cap is None or 
-            self._current_process_id != current_pid):
-            
-            # Clean up old capture if it exists
-            if self._process_video_cap is not None:
-                self._process_video_cap.release()
-            
+    def _get_video_cap(self):
+        """Get or create a video capture instance"""
+        if self._video_cap is None:
             # Check if file exists
             if not os.path.exists(self.video_path):
                 raise FileNotFoundError(f"Video file not found: {self.video_path}")
             
-            self._process_video_cap = cv2.VideoCapture(self.video_path)
-            self._process_video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self._current_process_id = current_pid
+            self._video_cap = cv2.VideoCapture(self.video_path)
+            self._video_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
-            if not self._process_video_cap.isOpened():
-                raise ValueError(f"Could not open video file in process {current_pid}: {self.video_path}")
+            if not self._video_cap.isOpened():
+                raise ValueError(f"Could not open video file: {self.video_path}")
         
-        return self._process_video_cap
+        return self._video_cap
     
     def _load_frame_by_index(self, mapped_idx):
         """Load a single frame by its mapped index"""
@@ -188,8 +177,8 @@ class VideoFrameDataset(Dataset):
         
         real_frame_idx = self.frame_indices[mapped_idx]
         
-        # Get per-process video capture (reused within same process)
-        cap = self._get_process_video_cap()
+        # Get video capture instance
+        cap = self._get_video_cap()
         
         # Set video position to the desired frame
         cap.set(cv2.CAP_PROP_POS_FRAMES, real_frame_idx)
@@ -218,10 +207,10 @@ class VideoFrameDataset(Dataset):
         return torch.stack(sequence, dim=0)
     
     def __del__(self):
-        """Cleanup: release process video capture"""
-        if hasattr(self, '_process_video_cap') and self._process_video_cap is not None:
+        """Cleanup: release video capture"""
+        if hasattr(self, '_video_cap') and self._video_cap is not None:
             try:
-                self._process_video_cap.release()
+                self._video_cap.release()
             except:
                 pass
 

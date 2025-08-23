@@ -87,17 +87,15 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
     
-    num_workers = min(2, os.cpu_count())
-    
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
+        num_workers=0,  # Single-process only
         pin_memory=torch.cuda.is_available()
     )
     
-    print(f"Using {num_workers} DataLoader workers")
+    print(f"Using single-process DataLoader (num_workers=0)")
     print(f"Dataset size: {len(dataset)} frames")
     print(f"Number of batches: {len(dataloader)}")
     
