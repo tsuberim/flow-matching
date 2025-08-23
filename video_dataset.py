@@ -5,6 +5,8 @@ import numpy as np
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm import tqdm
+import multiprocessing as mp
+from functools import partial
 
 
 class VideoFrameDataset(Dataset):
@@ -123,30 +125,52 @@ class VideoFrameDataset(Dataset):
         print(f"Preloading {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
         print(f"Preallocated tensor shape: {self.frames_tensor.shape}")
         
-        # Batch processing for better performance
-        batch_size = 100  # Process frames in batches
-        frames_loaded = 0
+        # Parallel processing setup
+        num_workers = min(mp.cpu_count(), 8)  # Limit workers to avoid too many file handles
+        batch_size = max(50, num_frames // (num_workers * 4))  # Adaptive batch size
         
-        with tqdm(total=num_frames, desc="Preloading frames") as pbar:
-            for batch_start in range(0, num_frames, batch_size):
-                batch_end = min(batch_start + batch_size, num_frames)
-                batch_indices = target_frame_indices[batch_start:batch_end]
-                
-                # Process batch
-                for i, frame_idx in enumerate(batch_indices):
+        print(f"Using {num_workers} workers with batch size {batch_size}")
+        
+        # Split frame indices into batches for parallel processing
+        frame_batches = []
+        for batch_start in range(0, num_frames, batch_size):
+            batch_end = min(batch_start + batch_size, num_frames)
+            batch_indices = target_frame_indices[batch_start:batch_end]
+            frame_batches.append((self.video_path, batch_indices, self.target_size))
+        
+        cap.release()  # Close main capture before spawning workers
+        
+        # Process batches in parallel with fallback
+        frames_loaded = 0
+        try:
+            with mp.Pool(num_workers) as pool:
+                with tqdm(total=num_frames, desc="Preloading frames (parallel)") as pbar:
+                    # Use imap for better progress tracking
+                    for batch_frames in pool.imap(VideoFrameDataset._load_and_process_frame_batch, frame_batches):
+                        if batch_frames:
+                            # Copy batch results into preallocated tensor
+                            batch_size_actual = len(batch_frames)
+                            for i, frame_tensor in enumerate(batch_frames):
+                                self.frames_tensor[frames_loaded + i] = frame_tensor
+                            frames_loaded += batch_size_actual
+                            pbar.update(batch_size_actual)
+        except Exception as e:
+            print(f"Parallel processing failed ({e}), falling back to sequential processing...")
+            # Fallback to sequential processing
+            cap = cv2.VideoCapture(self.video_path)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            with tqdm(total=num_frames, desc="Preloading frames (sequential)") as pbar:
+                for frame_idx in target_frame_indices:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                     ret, frame = cap.read()
                     
                     if ret:
-                        # Process frame directly into preallocated tensor
                         self._process_frame_into_tensor(frame, frames_loaded)
                         frames_loaded += 1
-                    else:
-                        print(f"Warning: Could not read frame {frame_idx}")
-                    
                     pbar.update(1)
-        
-        cap.release()
+            
+            cap.release()
         
         # Trim tensor if some frames failed to load
         if frames_loaded < num_frames:
@@ -185,6 +209,38 @@ class VideoFrameDataset(Dataset):
             frame_index += 1
         
         return target_frame_indices
+    
+    @staticmethod
+    def _load_and_process_frame_batch(args):
+        """Static method for parallel frame loading and processing"""
+        video_path, frame_indices, target_size = args
+        
+        # Each worker opens its own video capture
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None
+        
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        batch_frames = []
+        for frame_idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            
+            if ret:
+                # Process frame
+                resized = cv2.resize(frame, target_size, interpolation=cv2.INTER_NEAREST)
+                rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                
+                # Convert to tensor and normalize
+                frame_tensor = torch.from_numpy(rgb_frame).permute(2, 0, 1).float()
+                frame_tensor = frame_tensor / 127.5 - 1.0  # Normalize to [-1, 1]
+                batch_frames.append(frame_tensor)
+            else:
+                print(f"Warning: Could not read frame {frame_idx}")
+        
+        cap.release()
+        return batch_frames
     
     def _process_frame_into_tensor(self, frame, tensor_idx):
         """Process frame directly into preallocated tensor (more efficient)"""
