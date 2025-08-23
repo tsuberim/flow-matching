@@ -370,13 +370,13 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=8,
+        batch_size=10,
         lr=1e-5,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
         num_frames=1000,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
-        model_size=4,  # Model size multiplier
+        model_size=3,  # Model size multiplier
         project_name="video-vae"
     )
     
