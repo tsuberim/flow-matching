@@ -15,7 +15,7 @@ from utils import get_device
 
 def setup_multi_gpu(model, device):
     """
-    Setup model for multi-GPU training
+    Setup model for multi-GPU training with enhanced stability
     
     Args:
         model: PyTorch model
@@ -28,10 +28,25 @@ def setup_multi_gpu(model, device):
     num_gpus = torch.cuda.device_count()
     
     if num_gpus > 1:
-        print(f"Using {num_gpus} GPUs for training")
-        model = torch.nn.DataParallel(model)
-        # Move to primary device
+        print(f"Setting up {num_gpus} GPUs for training")
+        
+        # Move model to device first
         model = model.to(device)
+        
+        # Clear GPU cache before DataParallel
+        torch.cuda.empty_cache()
+        
+        # Wrap with DataParallel
+        model = torch.nn.DataParallel(model)
+        
+        # Set CUDA synchronization for stability
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+        
+        print(f"✅ DataParallel setup complete on {num_gpus} GPUs")
+        print(f"Primary device: {device}")
+        print(f"GPU devices: {list(range(num_gpus))}")
+        
     else:
         print(f"Using single GPU/device: {device}")
         model = model.to(device)
@@ -119,8 +134,9 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
     print("Loading video dataset...")
     dataset = create_video_dataset(num_frames=num_frames)
     # Use batch_size per GPU, DataParallel will handle splitting across GPUs
-    # Start with single worker for debugging, can increase once stable
-    num_workers = 0  # Force single worker for remote debugging
+    # Enable multiple workers for better performance with multi-GPU
+    available_gpus = torch.cuda.device_count()
+    num_workers = min(4, os.cpu_count()) if available_gpus > 1 else 2
     
     # Configure DataLoader based on worker count
     dataloader_kwargs = {
@@ -137,21 +153,14 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         dataloader_kwargs['timeout'] = 60
     
     dataloader = DataLoader(**dataloader_kwargs)
-    print(f"Using {num_workers} DataLoader workers (debugging mode for remote)")
+    print(f"Using {num_workers} DataLoader workers for multi-GPU training")
     
     print(f"Dataset size: {len(dataset)} frames")
     print(f"Number of batches: {len(dataloader)}")
     
     # Create VAE model and setup for multi-GPU
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
-    
-    # Temporarily disable multi-GPU for debugging
-    print("🔧 DEBUGGING: Disabling multi-GPU setup")
-    vae = vae.to(device)
-    num_gpus_used = 1
-    print(f"Using single GPU for debugging: {device}")
-    
-    # vae, num_gpus_used = setup_multi_gpu(vae, device)  # Re-enable later
+    vae, num_gpus_used = setup_multi_gpu(vae, device)
     
     # Scale learning rate by number of GPUs (common practice)
     scaled_lr = lr * num_gpus_used
@@ -435,7 +444,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=1,  # Reduced for debugging hanging issue
+        batch_size=8,  # Increased for multi-GPU utilization
         lr=1e-3,
         beta=1e-5,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
