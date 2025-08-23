@@ -2,6 +2,7 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import numpy as np
 import wandb
@@ -141,6 +142,9 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     # Use ReduceLROnPlateau but step it every batch with shorter patience
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=200, factor=0.8)
     
+    # Initialize mixed precision scaler
+    scaler = GradScaler()
+    
     # Load checkpoint if exists
     start_epoch = 0
     best_loss = float('inf')
@@ -162,6 +166,28 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
         
         print(f"Loaded checkpoint")
         vae.load_state_dict(model_state)
+        
+        # Try to load training state (optimizer, scheduler, scaler)
+        try:
+            state_path = checkpoint_path.replace('.safetensors', '_state.pt')
+            if os.path.exists(state_path):
+                checkpoint_data = torch.load(state_path, map_location=device)
+                
+                # Load scaler state for mixed precision
+                if 'scaler' in checkpoint_data:
+                    scaler.load_state_dict(checkpoint_data['scaler'])
+                    print("Loaded scaler state")
+                
+                # Extract metadata
+                start_epoch = checkpoint_data.get('epoch', 0)
+                best_loss = checkpoint_data.get('loss', float('inf'))
+                wandb_run_id = checkpoint_data.get('wandb_run_id', None)
+                print(f"Resuming from epoch {start_epoch}, batch {checkpoint_data.get('batch_idx', 0)}")
+            else:
+                print("No training state file found, starting fresh")
+        except Exception as state_e:
+            print(f"Failed to load training state: {state_e}")
+            
     except (FileNotFoundError, KeyError) as e:
         print(f"Checkpoint loading failed: {e}")
     except Exception as e:
@@ -187,8 +213,9 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
             # Zero gradients
             optimizer.zero_grad()
             
-            # Compute loss
-            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
+            # Mixed precision forward pass
+            with autocast():
+                loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
             
             # Check for NaN/inf in loss
             if torch.isnan(loss) or torch.isinf(loss):
@@ -201,13 +228,16 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
                 print(f"  Frames min/max: {frames.min().item():.4f}/{frames.max().item():.4f}")
                 continue  # Skip this batch
             
-            # Backward pass
-            loss.backward()
+            # Mixed precision backward pass
+            scaler.scale(loss).backward()
 
-            # Calculate and clip gradients
+            # Calculate and clip gradients (unscale first for mixed precision)
+            scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
 
-            optimizer.step()
+            # Mixed precision optimizer step
+            scaler.step(optimizer)
+            scaler.update()
             
             # Step scheduler after each batch with current loss
             scheduler.step(loss.item())
@@ -242,9 +272,24 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
             
             # Checkpoint and log images every 100 batches
             if batch_idx % 100 == 0:
-                # Save checkpoint
+                # Save checkpoint including scaler state
+                checkpoint_data = {
+                    'model': vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'scaler': scaler.state_dict(),
+                    'epoch': epoch,
+                    'batch_idx': batch_idx,
+                    'loss': loss.item(),
+                    'wandb_run_id': wandb.run.id
+                }
+                
+                # Save model weights with safetensors
                 model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
                 save_file(model_state, checkpoint_path)
+                
+                # Save training state with torch.save (includes scaler)
+                torch.save(checkpoint_data, checkpoint_path.replace('.safetensors', '_state.pt'))
                 
                 # Log reconstruction images
                 vae.eval()
@@ -370,7 +415,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=6,
+        batch_size=10,
         lr=1e-5,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
