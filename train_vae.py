@@ -36,12 +36,20 @@ def setup_multi_gpu(model, device):
         # Clear GPU cache before DataParallel
         torch.cuda.empty_cache()
         
-        # Wrap with DataParallel
-        model = torch.nn.DataParallel(model)
+        # Wrap with DataParallel with specific device IDs
+        device_ids = list(range(num_gpus))
+        model = torch.nn.DataParallel(model, device_ids=device_ids, output_device=0)
         
         # Set CUDA synchronization for stability
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
+        
+        # Force CUDA context initialization on all devices
+        for i in range(num_gpus):
+            with torch.cuda.device(i):
+                torch.cuda.empty_cache()
+                # Create a small tensor to initialize CUDA context
+                _ = torch.zeros(1).cuda()
         
         print(f"✅ DataParallel setup complete on {num_gpus} GPUs")
         print(f"Primary device: {device}")
