@@ -166,22 +166,12 @@ def vae_loss(vae, frames, beta=1e-5, gamma=0.01):
     Returns:
         total_loss, reconstruction_loss, kl_loss
     """
-    print(f"VAE loss - input frames shape: {frames.shape}")
-    
     t = frames.shape[1]
-    print(f"Reshaping frames for VAE forward pass...")
     input = rearrange(frames, 'b t c h w -> (b t) c h w')
-    print(f"Input to VAE shape: {input.shape}")
-    
-    print("Running VAE forward pass...")
     reconstruction, mu, logvar = vae(input)
-    print(f"✅ VAE forward pass completed")
-    
-    print("Reshaping outputs...")
     reconstruction = rearrange(reconstruction, '(b t) c h w -> b t c h w', t=t)
     mu = rearrange(mu, '(b t) c h w -> b t c h w', t=t)
     logvar = rearrange(logvar, '(b t) c h w -> b t c h w', t=t)
-    print("✅ Reshaping completed")
     
     # Reconstruction loss (MSE)
     recon_loss = F.mse_loss(reconstruction, frames, reduction='mean')

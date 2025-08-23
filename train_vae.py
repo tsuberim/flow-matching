@@ -184,85 +184,46 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=1.0, latent_dim=8,
         # Training loop with progress bar
         pbar = tqdm(dataloader, desc=f'Epoch {epoch+1}/{epochs}')
         
-        print(f"Starting epoch {epoch+1}, iterating through {len(dataloader)} batches...")
-        print("About to start DataLoader iteration...")
-        
-        try:
-            for batch_idx, frames in enumerate(pbar):
-                if batch_idx == 0:
-                    print(f"✅ Successfully loaded first batch with shape: {frames.shape}")
-                    print(f"✅ Batch device: {frames.device}, dtype: {frames.dtype}")
-                elif batch_idx % 5 == 0:
-                    print(f"Processing batch {batch_idx}/{len(dataloader)}")
-                    
-                # Add timeout detection for debugging
-                if batch_idx == 0 and epoch == 0:
-                    print("✅ First batch processing - DataLoader working correctly!")
-                
-                print(f"Moving batch to device: {device}")
-                frames = frames.to(device)
-                print(f"✅ Batch moved to device. Shape: {frames.shape}")
-                
-                # Zero gradients
-                print("Zeroing gradients...")
-                optimizer.zero_grad()
-                print("✅ Gradients zeroed")
-                
-                # Check GPU memory before forward pass
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()  # Clear cache
-                    memory_allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-                    print(f"GPU memory before forward pass: {memory_allocated:.2f} GB")
-                
-                # Compute loss
-                print("Computing VAE loss...")
-                try:
-                    loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
-                    print(f"✅ Loss computed: {loss.item():.4f}")
-                except RuntimeError as e:
-                    print(f"❌ CUDA Error during forward pass: {e}")
-                    if "out of memory" in str(e):
-                        print("💡 Try reducing batch_size or model_size")
-                    raise
-                
-                # Backward pass
-                loss.backward()
-                optimizer.step()
-                
-                # Accumulate losses
-                total_loss += loss.item()
-                total_recon_loss += recon_loss.item()
-                total_kl_loss += kl_loss.item()
-                total_sim_loss += sim_loss.item()
-                total_diff_loss += diff_loss.item()
+        for batch_idx, frames in enumerate(pbar):
+            frames = frames.to(device)
+            
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Compute loss
+            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
+            
+            # Backward pass
+            loss.backward()
+            optimizer.step()
+            
+            # Accumulate losses
+            total_loss += loss.item()
+            total_recon_loss += recon_loss.item()
+            total_kl_loss += kl_loss.item()
+            total_sim_loss += sim_loss.item()
+            total_diff_loss += diff_loss.item()
 
-                # Update progress bar
-                pbar.set_postfix({
-                    'Loss': f'{loss.item():.4f}',
-                    'Recon': f'{recon_loss.item():.4f}',
-                    'KL': f'{kl_loss.item():.4f}',
-                    'Sim': f'{sim_loss.item():.4f}',
-                    'Diff': f'{diff_loss.item():.4f}'
+            # Update progress bar
+            pbar.set_postfix({
+                'Loss': f'{loss.item():.4f}',
+                'Recon': f'{recon_loss.item():.4f}',
+                'KL': f'{kl_loss.item():.4f}',
+                'Sim': f'{sim_loss.item():.4f}',
+                'Diff': f'{diff_loss.item():.4f}'
+            })
+            
+            # Log metrics to wandb every few batches
+            if batch_idx % 10 == 0:
+                wandb.log({
+                    "batch_loss": loss.item(),
+                    "batch_recon_loss": recon_loss.item(),
+                    "batch_kl_loss": kl_loss.item(),
+                    "batch_sim_loss": sim_loss.item(),
+                    "batch_diff_loss": diff_loss.item(),
+                    "learning_rate": optimizer.param_groups[0]['lr'],
+                    "step": epoch * len(dataloader) + batch_idx
                 })
-                
-                # Log metrics to wandb every few batches
-                if batch_idx % 10 == 0:
-                    wandb.log({
-                        "batch_loss": loss.item(),
-                        "batch_recon_loss": recon_loss.item(),
-                        "batch_kl_loss": kl_loss.item(),
-                        "batch_sim_loss": sim_loss.item(),
-                        "batch_diff_loss": diff_loss.item(),
-                        "learning_rate": optimizer.param_groups[0]['lr'],
-                        "step": epoch * len(dataloader) + batch_idx
-                    })
-        
-        except Exception as e:
-            print(f"❌ Error during training epoch {epoch+1}: {e}")
-            print(f"❌ Error type: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
-            raise
         
         # Calculate average losses
         avg_loss = total_loss / len(dataloader)
