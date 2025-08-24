@@ -599,7 +599,7 @@ def save_sample_video(dataset, output_dir='./samples', video_length=64, fps=12):
 if __name__ == "__main__":
     # Example usage with all frames (12 FPS subsampling)
     print("Loading ALL frames from video...")
-    dataset = create_video_dataset(num_frames=1_000, target_fps=12)
+    dataset = create_video_dataset(num_frames=100_000, target_fps=12)
     
     print(f"Dataset length: {len(dataset)}")
     print(f"Frame shape: {dataset[0].shape}")
