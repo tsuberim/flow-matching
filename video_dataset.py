@@ -245,12 +245,20 @@ class VideoFrameDataset(Dataset):
             print("Warning: Could not initialize H5 cache, proceeding without caching")
             cache_path = None
         
-        # Preallocate tensor for in-memory access
+        # Only preallocate tensor if not using H5 cache (for memory efficiency)
         h, w = self.target_size[1], self.target_size[0]
-        self.frames_tensor = torch.empty(num_frames, 3, h, w, dtype=torch.float32)
+        if cache_path is None:
+            # Keep frames in memory when no H5 cache
+            self.frames_tensor = torch.empty(num_frames, 3, h, w, dtype=torch.float32)
+            print("No H5 cache - keeping frames in memory")
+        else:
+            # When using H5 cache, we'll load frames on-demand from cache
+            self.frames_tensor = None
+            print("Using H5 cache - frames will be loaded on-demand")
         
-        print(f"Preloading {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
-        print(f"Preallocated tensor shape: {self.frames_tensor.shape}")
+        print(f"Processing {num_frames:,} frames from {target_frame_indices[0]} to {target_frame_indices[-1]}")
+        if self.frames_tensor is not None:
+            print(f"Preallocated tensor shape: {self.frames_tensor.shape}")
         
         # Optimized parallel processing 
         num_workers = min(mp.cpu_count(), 16)  # Reduced workers to avoid overhead
@@ -286,16 +294,16 @@ class VideoFrameDataset(Dataset):
                             if batch_frames:
                                 batch_size_actual = len(batch_frames)
                                 
-                                # Store in tensor for fast access
-                                batch_tensors = []
-                                for i, frame_array in enumerate(batch_frames):
-                                    frame_tensor = torch.from_numpy(frame_array)
-                                    self.frames_tensor[tensor_start_idx + i] = frame_tensor
-                                    batch_tensors.append(frame_array)
+                                # Only store in memory if not using H5 cache
+                                if self.frames_tensor is not None:
+                                    # Store in tensor for fast access (no H5 cache)
+                                    for i, frame_array in enumerate(batch_frames):
+                                        frame_tensor = torch.from_numpy(frame_array)
+                                        self.frames_tensor[tensor_start_idx + i] = frame_tensor
                                 
                                 # Append to H5 cache on-the-fly
-                                if cache_path and batch_tensors:
-                                    self._append_frames_to_h5(cache_path, np.array(batch_tensors))
+                                if cache_path and batch_frames:
+                                    self._append_frames_to_h5(cache_path, np.array(batch_frames))
                                 
                                 frames_loaded += batch_size_actual
                                 pbar.update(batch_size_actual)
@@ -323,7 +331,10 @@ class VideoFrameDataset(Dataset):
                     if ret:
                         # Process frame
                         processed_frame = self._process_frame(frame)
-                        self.frames_tensor[frames_loaded] = processed_frame
+                        
+                        # Only store in memory if not using H5 cache
+                        if self.frames_tensor is not None:
+                            self.frames_tensor[frames_loaded] = processed_frame
                         
                         # Add to batch for H5 writing
                         if cache_path:
@@ -344,21 +355,30 @@ class VideoFrameDataset(Dataset):
             
             cap.release()
         
-        # Trim tensor if some frames failed to load
-        if frames_loaded < num_frames:
+        # Trim tensor if some frames failed to load (only if using in-memory storage)
+        if self.frames_tensor is not None and frames_loaded < num_frames:
             self.frames_tensor = self.frames_tensor[:frames_loaded]
         
         # Update actual number of frames
         if self.num_frames is None:
             self.num_frames = frames_loaded
         
-        print(f"Successfully preloaded {len(self.frames_tensor):,} frames")
-        print(f"Tensor shape: {self.frames_tensor.shape}")
+        # Store cache info for on-demand loading
+        self.cache_path = cache_path
+        self.total_frames = frames_loaded
+        
+        if self.frames_tensor is not None:
+            print(f"Successfully preloaded {len(self.frames_tensor):,} frames in memory")
+            print(f"Tensor shape: {self.frames_tensor.shape}")
+            print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
+        else:
+            print(f"Successfully processed {frames_loaded:,} frames (stored in H5 cache)")
+            print(f"Memory usage: minimal (on-demand loading from H5)")
+        
         print(f"Effective FPS: {1/self.target_frame_interval:.2f} (target: {self.target_fps})")
-        print(f"Memory usage: ~{self.frames_tensor.numel() * 4 / 1024**2:.1f} MB")
         
         if cache_path:
-            print(f"✅ Frames saved to H5 cache on-the-fly: {cache_path}")
+            print(f"✅ Frames saved to H5 cache: {cache_path}")
     
     def _compute_target_frame_indices(self):
         """Compute which frame indices we need based on time sampling"""
@@ -458,21 +478,53 @@ class VideoFrameDataset(Dataset):
         return tensor
     
     def _get_frame_by_index(self, idx):
-        """Get a preloaded frame by index from stacked tensor"""
-        if idx >= len(self.frames_tensor):
-            raise IndexError(f"Frame index {idx} out of range for {len(self.frames_tensor)} preloaded frames")
-        return self.frames_tensor[idx]
+        """Get a frame by index from memory or H5 cache"""
+        if self.frames_tensor is not None:
+            # Get from in-memory tensor
+            if idx >= len(self.frames_tensor):
+                raise IndexError(f"Frame index {idx} out of range for {len(self.frames_tensor)} preloaded frames")
+            return self.frames_tensor[idx]
+        else:
+            # Load from H5 cache
+            if idx >= self.total_frames:
+                raise IndexError(f"Frame index {idx} out of range for {self.total_frames} cached frames")
+            try:
+                with h5py.File(self.cache_path, 'r') as f:
+                    frame_data = f['frames'][idx]
+                    return torch.from_numpy(frame_data).float()
+            except Exception as e:
+                raise RuntimeError(f"Failed to load frame {idx} from H5 cache: {e}")
     
     def __len__(self):
         # Number of possible sequences (accounting for sequence length)
-        return max(0, len(self.frames_tensor) - self.sequence_length + 1)
+        if self.frames_tensor is not None:
+            return max(0, len(self.frames_tensor) - self.sequence_length + 1)
+        else:
+            # Using H5 cache - get length from cached frame count
+            return max(0, self.total_frames - self.sequence_length + 1)
     
     def __getitem__(self, idx):
         if idx >= len(self):
             raise IndexError(f"Index {idx} out of range for {len(self)} sequences")
         
-        # Get sequence using tensor slicing (much faster than individual access)
-        return self.frames_tensor[idx:idx + self.sequence_length]
+        if self.frames_tensor is not None:
+            # Get sequence using tensor slicing (much faster than individual access)
+            return self.frames_tensor[idx:idx + self.sequence_length]
+        else:
+            # Load sequence on-demand from H5 cache
+            return self._load_sequence_from_h5(idx)
+    
+    def _load_sequence_from_h5(self, idx):
+        """Load a sequence on-demand from H5 cache"""
+        try:
+            with h5py.File(self.cache_path, 'r') as f:
+                frames_dataset = f['frames']
+                # Load the required sequence frames
+                sequence_data = frames_dataset[idx:idx + self.sequence_length]
+                # Convert to tensor
+                return torch.from_numpy(sequence_data).float()
+        except Exception as e:
+            raise RuntimeError(f"Failed to load sequence {idx} from H5 cache: {e}")
     
     def __del__(self):
         """Cleanup: clear preloaded frames tensor"""
