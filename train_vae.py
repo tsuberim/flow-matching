@@ -373,7 +373,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=1 * 48,
+        batch_size=1 * 40,
         lr=1e-4,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
