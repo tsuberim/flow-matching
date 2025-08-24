@@ -377,7 +377,7 @@ if __name__ == "__main__":
         lr=1e-4,
         beta=0.0,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
-        num_frames=10000,  # Use subset for faster training
+        num_frames=100_000,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
         model_size=1,  # Model size multiplier
         project_name="video-vae"
