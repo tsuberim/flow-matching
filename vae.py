@@ -132,9 +132,6 @@ class VideoVAE(nn.Module):
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
 
-        print(f"FC mu output shape: {mu.shape}")
-        print(f"FC logvar output shape: {logvar.shape}")
-        
         return mu, logvar
     
     def reparameterize(self, mu, logvar):
