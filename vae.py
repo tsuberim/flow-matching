@@ -20,38 +20,36 @@ class VideoVAE(nn.Module):
         # Improved Encoder with BatchNorm and more layers
         self.encoder = nn.Sequential(
             # 320x180 -> 160x90
-            nn.Conv2d(3, 32 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(3, 32 * model_size, 4, stride=1, padding=1),
             nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
 
             # 160x90 -> 80x45
-            nn.Conv2d(32 * model_size, 64 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(32 * model_size, 64 * model_size, 4, stride=1, padding=1),
             nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
 
             # 80x45 -> 40x23
-            nn.Conv2d(64 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(64 * model_size, 128 * model_size, (4, 9), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
 
             # Additional layer 1: 40x23 -> 20x12
-            nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(128 * model_size, 128 * model_size, (8, 14), stride=1, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
 
             # Additional layer 2: 20x12 -> 10x6
-            nn.Conv2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(128 * model_size, 128 * model_size, (6, 10), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
 
             # Final layer: 10x6 -> 5x3
-            nn.Conv2d(128 * model_size, 256 * model_size, 4, stride=2, padding=1),
+            nn.Conv2d(128 * model_size, 256 * model_size, (8, 8), stride=2, padding=1),
             nn.BatchNorm2d(256 * model_size),
             nn.ReLU(),
         )
 
-        # Use bilinear upsampling instead of adaptive pooling for MPS compatibility
-        self.encoder_pool = nn.Upsample(size=(18, 32), mode='bilinear', align_corners=False)
         
         # Final conv layers for mu and logvar (updated for 256 channels)
         self.fc_mu = nn.Conv2d(256 * model_size, latent_dim, 1)
@@ -77,12 +75,12 @@ class VideoVAE(nn.Module):
             nn.ReLU(),
 
             # 144x256 -> adjust to get closer to target size
-            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=1, padding=2),
+            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=1, padding=1),
             nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
 
             # Final refinement
-            nn.Conv2d(32 * model_size, 16 * model_size, 3, padding=1),
+            nn.Conv2d(32 * model_size, 16 * model_size, 4, padding=1),
             nn.BatchNorm2d(16 * model_size),
             nn.ReLU(),
 
@@ -130,10 +128,12 @@ class VideoVAE(nn.Module):
             mu, logvar: [B, latent_dim, 18, 32] mean and log variance
         """
         h = self.encoder(x)  # Should be [B, 128, 6, 10]
-        h = self.encoder_pool(h)  # Upsample to [B, 128, 18, 32]
         
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
+
+        print(f"FC mu output shape: {mu.shape}")
+        print(f"FC logvar output shape: {logvar.shape}")
         
         return mu, logvar
     
@@ -247,11 +247,11 @@ def create_video_vae(latent_dim=8, model_size=1):
 if __name__ == "__main__":
     # Test the VAE
     device = get_device()
-    vae = create_video_vae(latent_dim=8, model_size=2).to(device)
+    vae = create_video_vae(latent_dim=16, model_size=1).to(device)
     
     # Test with dummy input
     batch_size = 4
-    seq_len = 32
+    seq_len = 2
     x = torch.randn(batch_size, seq_len, 3, 180, 320).to(device)
     
     print(f"Input shape: {x.shape}")
