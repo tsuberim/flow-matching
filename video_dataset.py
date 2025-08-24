@@ -136,14 +136,22 @@ class VideoFrameDataset(Dataset):
                     cached_num_frames == self.num_frames and
                     cached_video_path == self.video_path):
                     
-                    # Load frames dataset with progress bar
+                    # Load frames dataset with chunked progress bar
                     frames_dataset = f['frames']
                     total_frames = frames_dataset.shape[0]
+                    chunk_size = min(1000, max(100, total_frames // 50))  # Dynamic chunk size
                     
                     print(f"Loading {total_frames:,} frames from H5 cache...")
+                    
+                    # Pre-allocate tensor
+                    frame_shape = frames_dataset.shape[1:]  # (3, H, W)
+                    frames_data = np.empty((total_frames,) + frame_shape, dtype=frames_dataset.dtype)
+                    
                     with tqdm(total=total_frames, desc="Loading from H5", unit="frames") as pbar:
-                        frames_data = frames_dataset[:]
-                        pbar.update(total_frames)
+                        for start_idx in range(0, total_frames, chunk_size):
+                            end_idx = min(start_idx + chunk_size, total_frames)
+                            frames_data[start_idx:end_idx] = frames_dataset[start_idx:end_idx]
+                            pbar.update(end_idx - start_idx)
                     
                     self.frames_tensor = torch.from_numpy(frames_data).float()
                     print(f"✅ Loaded {len(self.frames_tensor):,} frames from H5 cache!")
@@ -158,31 +166,38 @@ class VideoFrameDataset(Dataset):
 
     
     def _save_frames_to_h5(self, cache_path):
-        """Save all frames to H5 cache at the end"""
+        """Save all frames to H5 cache with chunked progress"""
         try:
             total_frames = len(self.frames_tensor)
+            chunk_size = min(1000, max(100, total_frames // 50))  # Dynamic chunk size
             print(f"Saving {total_frames:,} frames to H5 cache...")
             
-            with tqdm(total=total_frames, desc="Saving to H5", unit="frames") as pbar:
-                with h5py.File(cache_path, 'w') as f:
-                    # Save frames data with compression
-                    h, w = self.target_size[1], self.target_size[0]
-                    f.create_dataset('frames', 
-                                   data=self.frames_tensor.numpy(),
-                                   compression='gzip', 
-                                   compression_opts=1, 
-                                   shuffle=True,
-                                   chunks=(min(50, total_frames), 3, h, w))
-                    
-                    pbar.update(total_frames)
-                    
-                    # Save metadata as attributes (ensure string encoding)
-                    f.attrs['target_width'] = int(self.target_size[0])
-                    f.attrs['target_height'] = int(self.target_size[1])
-                    f.attrs['target_fps'] = float(self.target_fps)
-                    f.attrs['num_frames'] = int(self.num_frames) if self.num_frames is not None else -1
-                    f.attrs['video_path'] = str(self.video_path).encode('utf-8')
-                    f.attrs['total_frames'] = total_frames
+            with h5py.File(cache_path, 'w') as f:
+                # Create dataset without data first
+                h, w = self.target_size[1], self.target_size[0]
+                frames_dataset = f.create_dataset('frames', 
+                                               shape=(total_frames, 3, h, w),
+                                               dtype=np.float32,
+                                               compression='gzip', 
+                                               compression_opts=1, 
+                                               shuffle=True,
+                                               chunks=(min(50, total_frames), 3, h, w))
+                
+                # Write data in chunks with progress
+                frames_numpy = self.frames_tensor.numpy()
+                with tqdm(total=total_frames, desc="Saving to H5", unit="frames") as pbar:
+                    for start_idx in range(0, total_frames, chunk_size):
+                        end_idx = min(start_idx + chunk_size, total_frames)
+                        frames_dataset[start_idx:end_idx] = frames_numpy[start_idx:end_idx]
+                        pbar.update(end_idx - start_idx)
+                
+                # Save metadata as attributes (ensure string encoding)
+                f.attrs['target_width'] = int(self.target_size[0])
+                f.attrs['target_height'] = int(self.target_size[1])
+                f.attrs['target_fps'] = float(self.target_fps)
+                f.attrs['num_frames'] = int(self.num_frames) if self.num_frames is not None else -1
+                f.attrs['video_path'] = str(self.video_path).encode('utf-8')
+                f.attrs['total_frames'] = total_frames
                 
             print(f"✅ Saved {total_frames:,} frames to H5 cache: {cache_path}")
         except Exception as e:
@@ -221,7 +236,7 @@ class VideoFrameDataset(Dataset):
         
         # Optimized parallel processing 
         num_workers = min(mp.cpu_count(), 16)  # Reduced workers to avoid overhead
-        batch_size = max(8, min(16, num_frames // num_workers))  # Larger batches for efficiency
+        batch_size = max(8, min(50, num_frames // num_workers))  # Larger batches for efficiency
         
         print(f"Using {num_workers} workers with batch size {batch_size}")
         
@@ -584,7 +599,7 @@ def save_sample_video(dataset, output_dir='./samples', video_length=64, fps=12):
 if __name__ == "__main__":
     # Example usage with all frames (12 FPS subsampling)
     print("Loading ALL frames from video...")
-    dataset = create_video_dataset(num_frames=100_000, target_fps=12)
+    dataset = create_video_dataset(num_frames=1_000, target_fps=12)
     
     print(f"Dataset length: {len(dataset)}")
     print(f"Frame shape: {dataset[0].shape}")
