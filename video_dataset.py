@@ -136,10 +136,17 @@ class VideoFrameDataset(Dataset):
                     cached_num_frames == self.num_frames and
                     cached_video_path == self.video_path):
                     
-                    # Load frames dataset
-                    frames_data = f['frames'][:]
+                    # Load frames dataset with progress bar
+                    frames_dataset = f['frames']
+                    total_frames = frames_dataset.shape[0]
+                    
+                    print(f"Loading {total_frames:,} frames from H5 cache...")
+                    with tqdm(total=total_frames, desc="Loading from H5", unit="frames") as pbar:
+                        frames_data = frames_dataset[:]
+                        pbar.update(total_frames)
+                    
                     self.frames_tensor = torch.from_numpy(frames_data).float()
-                    print(f"Loaded {len(self.frames_tensor)} frames from H5 cache!")
+                    print(f"✅ Loaded {len(self.frames_tensor):,} frames from H5 cache!")
                     return True
                 else:
                     print("Cache metadata mismatch, regenerating...")
@@ -153,25 +160,31 @@ class VideoFrameDataset(Dataset):
     def _save_frames_to_h5(self, cache_path):
         """Save all frames to H5 cache at the end"""
         try:
-            with h5py.File(cache_path, 'w') as f:
-                # Save frames data with compression
-                h, w = self.target_size[1], self.target_size[0]
-                f.create_dataset('frames', 
-                               data=self.frames_tensor.numpy(),
-                               compression='gzip', 
-                               compression_opts=1, 
-                               shuffle=True,
-                               chunks=(min(50, len(self.frames_tensor)), 3, h, w))
+            total_frames = len(self.frames_tensor)
+            print(f"Saving {total_frames:,} frames to H5 cache...")
+            
+            with tqdm(total=total_frames, desc="Saving to H5", unit="frames") as pbar:
+                with h5py.File(cache_path, 'w') as f:
+                    # Save frames data with compression
+                    h, w = self.target_size[1], self.target_size[0]
+                    f.create_dataset('frames', 
+                                   data=self.frames_tensor.numpy(),
+                                   compression='gzip', 
+                                   compression_opts=1, 
+                                   shuffle=True,
+                                   chunks=(min(50, total_frames), 3, h, w))
+                    
+                    pbar.update(total_frames)
+                    
+                    # Save metadata as attributes (ensure string encoding)
+                    f.attrs['target_width'] = int(self.target_size[0])
+                    f.attrs['target_height'] = int(self.target_size[1])
+                    f.attrs['target_fps'] = float(self.target_fps)
+                    f.attrs['num_frames'] = int(self.num_frames) if self.num_frames is not None else -1
+                    f.attrs['video_path'] = str(self.video_path).encode('utf-8')
+                    f.attrs['total_frames'] = total_frames
                 
-                # Save metadata as attributes (ensure string encoding)
-                f.attrs['target_width'] = int(self.target_size[0])
-                f.attrs['target_height'] = int(self.target_size[1])
-                f.attrs['target_fps'] = float(self.target_fps)
-                f.attrs['num_frames'] = int(self.num_frames) if self.num_frames is not None else -1
-                f.attrs['video_path'] = str(self.video_path).encode('utf-8')
-                f.attrs['total_frames'] = len(self.frames_tensor)
-                
-            print(f"Saved {len(self.frames_tensor)} frames to H5 cache: {cache_path}")
+            print(f"✅ Saved {total_frames:,} frames to H5 cache: {cache_path}")
         except Exception as e:
             print(f"Warning: Could not save H5 cache: {e}")
             # Remove partial cache file
