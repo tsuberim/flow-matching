@@ -221,7 +221,7 @@ class VideoFrameDataset(Dataset):
         
         # Optimized parallel processing 
         num_workers = min(mp.cpu_count(), 16)  # Reduced workers to avoid overhead
-        batch_size = max(50, min(200, num_frames // num_workers))  # Larger batches for efficiency
+        batch_size = max(8, min(16, num_frames // num_workers))  # Larger batches for efficiency
         
         print(f"Using {num_workers} workers with batch size {batch_size}")
         
