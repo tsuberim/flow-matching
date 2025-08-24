@@ -149,7 +149,6 @@ class VideoVAE(nn.Module):
         """
         h = self.decoder_input(z)  # [B, 256, 18, 32]
         reconstruction = self.decoder(h)  # [B, 3, ~144, ~256]
-        print(f"Reconstruction shape: {reconstruction.shape}")
         return reconstruction
     
     def forward(self, x):
