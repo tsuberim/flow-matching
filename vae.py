@@ -60,22 +60,22 @@ class VideoVAE(nn.Module):
 
         self.decoder = nn.Sequential(
             # 18x32 -> 36x64
-            nn.ConvTranspose2d(256 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(256 * model_size, 128 * model_size, 8, stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
 
             # 36x64 -> 72x128
-            nn.ConvTranspose2d(128 * model_size, 128 * model_size, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 * model_size, 128 * model_size, (8, 14), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
 
             # 72x128 -> 144x256
-            nn.ConvTranspose2d(128 * model_size, 64 * model_size, 4, stride=2, padding=1),
+            nn.ConvTranspose2d(128 * model_size, 64 * model_size, (8, 16), stride=1, padding=1),
             nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
 
             # 144x256 -> adjust to get closer to target size
-            nn.ConvTranspose2d(64 * model_size, 32 * model_size, 4, stride=1, padding=1),
+            nn.ConvTranspose2d(64 * model_size, 32 * model_size, (7, 7), stride=2, padding=1),
             nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
 
@@ -89,9 +89,6 @@ class VideoVAE(nn.Module):
             nn.Tanh()
         )
 
-        # Add final upsampling to ensure exact output size
-        self.final_upsample = nn.Upsample(size=(180, 320), mode='bilinear', align_corners=False)
-        
         # Initialize weights properly
         self._initialize_weights()
         
@@ -152,7 +149,9 @@ class VideoVAE(nn.Module):
         """
         h = self.decoder_input(z)  # [B, 256, 18, 32]
         reconstruction = self.decoder(h)  # [B, 3, ~144, ~256]
-        reconstruction = self.final_upsample(reconstruction)  # [B, 3, 180, 320]
+        print(f"Reconstruction shape: {reconstruction.shape}")
+        import sys
+        sys.exit()
         return reconstruction
     
     def forward(self, x):
