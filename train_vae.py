@@ -9,7 +9,7 @@ from safetensors.torch import save_file, load_file
 import os
 
 from vae import create_video_vae, vae_loss
-from video_dataset import create_video_dataset
+from video_dataset2 import create_dataset
 from utils import get_device
 
 
@@ -49,7 +49,8 @@ def log_reconstruction_to_wandb(original, reconstruction, epoch):
 
 
 def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8, 
-              num_frames=None, visualize_every=10, model_size=1, project_name="video-vae"):
+              num_frames=None, visualize_every=10, model_size=1, project_name="video-vae",
+              h5_path=None):
     """
     Train the VAE on video frames
     
@@ -63,6 +64,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
         visualize_every: visualize reconstruction every N epochs
         model_size: model size multiplier for channels
         project_name: wandb project name
+        h5_path: path to preprocessed H5 file (if None, uses default)
     """
     device = get_device()
     print(f"Using device: {device}")
@@ -91,19 +93,32 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     
     # Create dataset and dataloader
     print("Loading video dataset...")
-    dataset = create_video_dataset(num_frames=num_frames, sequence_length=8)
+    # Use provided h5_path or default
+    if h5_path is None:
+        h5_path = "videos/pntCyf13iUQ.h5"  # Default H5 path
+    
+    if not os.path.exists(h5_path):
+        raise FileNotFoundError(f"H5 file not found: {h5_path}. Please run: python preprocess_video.py --video_path <your_video.mp4>")
+    
+    dataset = create_dataset(h5_path=h5_path, sequence_length=2, num_frames=num_frames)
     
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,  # Single-process only
-        pin_memory=torch.cuda.is_available()
+        num_workers=0,  # Use 0 since dataset is preloaded in memory
+        pin_memory=False  # Not needed since data is already in memory
     )
     
-    print(f"Using single-process DataLoader (num_workers=0)")
-    print(f"Dataset size: {len(dataset)} frames")
-    print(f"Number of batches: {len(dataloader)}")
+    print(f"Using DataLoader with preloaded data (num_workers=0)")
+    print(f"Dataset sequences: {len(dataset):,}")
+    print(f"Number of batches: {len(dataloader):,}")
+    
+    # Get dataset info
+    info = dataset.get_info()
+    print(f"Total frames in H5: {info['total_frames']:,}")
+    print(f"Frame size: {info['width']}x{info['height']}")
+    print(f"Sequence length: {info['sequence_length']}")
     
     # Create VAE model and move to device
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
@@ -375,14 +390,15 @@ if __name__ == "__main__":
         epochs=50,
         batch_size=5,
         lr=1e-4,
-        beta=1e-5,  # Start with beta~=0 (no KL regularization)
+        beta=1e-6,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
-        num_frames=10_000,  # Use subset for faster training
+        num_frames=100_000,  # Use subset for faster training
         # visualize_every=1,  # Show reconstructions every epoch
-        model_size=2,  # Model size multiplier
-        project_name="video-vae"
+        model_size=4,  # Model size multiplier
+        project_name="video-vae",
+        h5_path="videos/pntCyf13iUQ.h5"  # Preprocessed H5 file
     )
     
     # Test sampling
     print("\nTesting VAE sampling...")
-    test_vae_sampling(latent_dim=16, num_samples=16, model_size=1)
+    test_vae_sampling(latent_dim=16, num_samples=16, model_size=4)
