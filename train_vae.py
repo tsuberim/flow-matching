@@ -100,7 +100,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"H5 file not found: {h5_path}. Please run: python preprocess_video.py --video_path <your_video.mp4>")
     
-    dataset = create_dataset(h5_path=h5_path, sequence_length=8, num_frames=num_frames)
+    dataset = create_dataset(h5_path=h5_path, sequence_length=4, num_frames=num_frames)
     
     dataloader = DataLoader(
         dataset=dataset,
@@ -388,7 +388,7 @@ if __name__ == "__main__":
     # Train VAE
     trained_vae = train_vae(
         epochs=50,
-        batch_size=2,
+        batch_size=4,
         lr=1e-4,
         beta=1e-6,  # Start with beta~=0 (no KL regularization)
         latent_dim=16,
