@@ -7,22 +7,11 @@ import numpy as np
 import wandb
 from safetensors.torch import save_file, load_file
 import os
-import subprocess
 import argparse
 
 from vae import create_video_vae, vae_loss
 from video_dataset2 import create_dataset
 from utils import get_device
-
-
-def get_git_commit_hash():
-    """Get the current git commit hash (short version)"""
-    try:
-        result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], 
-                              capture_output=True, text=True, check=True)
-        return result.stdout.strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
 
 
 
@@ -62,7 +51,7 @@ def log_reconstruction_to_wandb(original, reconstruction, epoch):
 
 def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8, 
               num_frames=None, gamma=1.0, model_size=1, project_name="video-vae",
-              h5_path=None):
+              h5_path=None, sequence_length=1):
     """
     Train the VAE on video frames
     
@@ -77,16 +66,14 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
         model_size: model size multiplier for channels
         project_name: wandb project name
         h5_path: path to preprocessed H5 file (if None, uses default)
+        sequence_length: sequence length for dataset creation
     """
     device = get_device()
     print(f"Using device: {device}")
     print(f"Batch size: {batch_size}")
     
-    # Get git commit hash for model naming
-    commit_hash = get_git_commit_hash()
-    
     # Load checkpoint if exists (check for model file only)
-    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}_{commit_hash}.safetensors'
+    checkpoint_path = f'vae_checkpoint_dim{latent_dim}_size{model_size}.safetensors'
     wandb_run_id = None
 
     # Initialize wandb (resume if we have a run ID)
@@ -115,7 +102,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
     if not os.path.exists(h5_path):
         raise FileNotFoundError(f"H5 file not found: {h5_path}. Please run: python preprocess_video.py --video_path <your_video.mp4>")
     
-    dataset = create_dataset(h5_path=h5_path, sequence_length=8, num_frames=num_frames)
+    dataset = create_dataset(h5_path=h5_path, sequence_length=sequence_length, num_frames=num_frames)
     
     dataloader = DataLoader(
         dataset=dataset,
@@ -328,7 +315,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
         print(f"Epoch {epoch+1} completed (avg loss: {avg_loss:.4f}, best: {best_loss:.4f})")
     
     # Final model save using safetensors
-    final_model_path = f'vae_final_dim{latent_dim}_size{model_size}_{commit_hash}.safetensors'
+    final_model_path = f'vae_final_dim{latent_dim}_size{model_size}.safetensors'
     # Handle DataParallel for final save
     final_model_state = vae.module.state_dict() if isinstance(vae, torch.nn.DataParallel) else vae.state_dict()
     save_file(final_model_state, final_model_path)
@@ -351,9 +338,6 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     """
     device = get_device()
     
-    # Get git commit hash for model naming
-    commit_hash = get_git_commit_hash()
-    
     # Load trained VAE
     vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
     vae = vae.to(device)
@@ -363,7 +347,7 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
         vae = torch.nn.DataParallel(vae)
     
     try:
-        model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}_{commit_hash}.safetensors')
+        model_state = load_file(f'vae_final_dim{latent_dim}_size{model_size}.safetensors')
         
         # Handle DataParallel loading properly
         is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
@@ -419,6 +403,7 @@ def create_arg_parser():
     # Data parameters
     parser.add_argument("--num_frames", type=int, default=100_000, help="Number of frames to use from video")
     parser.add_argument("--h5_path", type=str, default="videos/pntCyf13iUQ.h5", help="Path to preprocessed H5 file")
+    parser.add_argument("--sequence_length", type=int, default=1, help="Sequence length for dataset creation")
     
     # Other parameters
     parser.add_argument("--project_name", type=str, default="video-vae", help="Wandb project name")
@@ -452,7 +437,8 @@ if __name__ == "__main__":
         gamma=args.gamma,
         model_size=args.model_size,
         project_name=args.project_name,
-        h5_path=args.h5_path
+        h5_path=args.h5_path,
+        sequence_length=args.sequence_length
     )
     
     # Test sampling if requested
