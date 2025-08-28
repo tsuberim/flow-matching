@@ -61,7 +61,7 @@ def log_reconstruction_to_wandb(original, reconstruction, epoch):
 
 
 def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8, 
-              num_frames=None, visualize_every=10, model_size=1, project_name="video-vae",
+              num_frames=None, gamma=1.0, model_size=1, project_name="video-vae",
               h5_path=None):
     """
     Train the VAE on video frames
@@ -73,7 +73,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
         beta: beta parameter for beta-VAE (KL weight)
         latent_dim: latent space dimensionality
         num_frames: number of frames to use from video
-        visualize_every: visualize reconstruction every N epochs
+        gamma: gamma parameter for loss weighting
         model_size: model size multiplier for channels
         project_name: wandb project name
         h5_path: path to preprocessed H5 file (if None, uses default)
@@ -221,7 +221,7 @@ def train_vae(epochs=100, batch_size=32, lr=1e-3, beta=0.0, latent_dim=8,
             optimizer.zero_grad()
             
             # Compute loss
-            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta)
+            loss, recon_loss, kl_loss, sim_loss, diff_loss = vae_loss(vae, frames, beta=beta, gamma=gamma)
             
             # Check for NaN/inf in loss
             if torch.isnan(loss) or torch.isinf(loss):
@@ -422,7 +422,7 @@ def create_arg_parser():
     
     # Other parameters
     parser.add_argument("--project_name", type=str, default="video-vae", help="Wandb project name")
-    parser.add_argument("--visualize_every", type=int, default=10, help="Visualize reconstruction every N epochs")
+    parser.add_argument("--gamma", type=float, default=1.0, help="Gamma parameter for loss weighting")
     
     # Sampling parameters
     parser.add_argument("--test_sampling", action="store_true", help="Run VAE sampling test after training")
@@ -449,7 +449,7 @@ if __name__ == "__main__":
         beta=args.beta,
         latent_dim=args.latent_dim,
         num_frames=args.num_frames,
-        visualize_every=args.visualize_every,
+        gamma=args.gamma,
         model_size=args.model_size,
         project_name=args.project_name,
         h5_path=args.h5_path
