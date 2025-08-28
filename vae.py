@@ -182,7 +182,7 @@ class VideoVAE(nn.Module):
         return samples
 
 
-def vae_loss(vae, frames, beta=0.0, gamma=0.001):
+def vae_loss(vae, frames, beta=0.0, gamma=0.000):
     """
     VAE loss function
     Args:
