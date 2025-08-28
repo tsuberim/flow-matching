@@ -8,6 +8,7 @@ import wandb
 from safetensors.torch import save_file, load_file
 import os
 import subprocess
+import argparse
 
 from vae import create_video_vae, vae_loss
 from video_dataset2 import create_dataset
@@ -401,21 +402,64 @@ def test_vae_sampling(latent_dim=8, num_samples=16, model_size=1):
     print(f"Generated {len(sample_images)} samples and logged to wandb")
 
 
+def create_arg_parser():
+    """Create and return argument parser for CLI"""
+    parser = argparse.ArgumentParser(description="Train Video VAE")
+    
+    # Training parameters
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=11, help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--beta", type=float, default=0.0, help="Beta parameter for beta-VAE (KL weight)")
+    
+    # Model parameters
+    parser.add_argument("--latent_dim", type=int, default=16, help="Latent space dimensionality")
+    parser.add_argument("--model_size", type=int, default=2, help="Model size multiplier for channels")
+    
+    # Data parameters
+    parser.add_argument("--num_frames", type=int, default=100_000, help="Number of frames to use from video")
+    parser.add_argument("--h5_path", type=str, default="videos/pntCyf13iUQ.h5", help="Path to preprocessed H5 file")
+    
+    # Other parameters
+    parser.add_argument("--project_name", type=str, default="video-vae", help="Wandb project name")
+    parser.add_argument("--visualize_every", type=int, default=10, help="Visualize reconstruction every N epochs")
+    
+    # Sampling parameters
+    parser.add_argument("--test_sampling", action="store_true", help="Run VAE sampling test after training")
+    parser.add_argument("--num_samples", type=int, default=16, help="Number of samples to generate for testing")
+    
+    return parser
+
+
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = create_arg_parser()
+    args = parser.parse_args()
+    
+    print(f"Training VAE with parameters:")
+    for arg, value in vars(args).items():
+        print(f"  {arg}: {value}")
+    print()
+    
     # Train VAE
     trained_vae = train_vae(
-        epochs=50,
-        batch_size=11,
-        lr=1e-4,
-        beta=0.0,  # Start with beta~=0 (no KL regularization)
-        latent_dim=16,
-        num_frames=1_000,  # Use subset for faster training
-        # visualize_every=1,  # Show reconstructions every epoch
-        model_size=2,  # Model size multiplier
-        project_name="video-vae",
-        h5_path="videos/pntCyf13iUQ.h5"  # Preprocessed H5 file
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        beta=args.beta,
+        latent_dim=args.latent_dim,
+        num_frames=args.num_frames,
+        visualize_every=args.visualize_every,
+        model_size=args.model_size,
+        project_name=args.project_name,
+        h5_path=args.h5_path
     )
     
-    # Test sampling
-    print("\nTesting VAE sampling...")
-    test_vae_sampling(latent_dim=16, num_samples=16, model_size=4)
+    # Test sampling if requested
+    if args.test_sampling:
+        print("\nTesting VAE sampling...")
+        test_vae_sampling(
+            latent_dim=args.latent_dim, 
+            num_samples=args.num_samples, 
+            model_size=args.model_size
+        )
