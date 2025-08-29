@@ -115,17 +115,16 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.7)
     
-    # Load checkpoint if exists
+    # Load model if exists
     checkpoint_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.safetensors'
     try:
-        checkpoint = load_file(checkpoint_path)  # Load to CPU first
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        print(f"Loaded checkpoint from {checkpoint_path}, resuming from epoch {start_epoch}")
+        model_state_dict = load_file(checkpoint_path)  # Load to CPU first
+        model.load_state_dict(model_state_dict)
+        print(f"Loaded model from {checkpoint_path}")
+        start_epoch = 0  # Always start from epoch 0 since we don't save training state
     except FileNotFoundError:
         start_epoch = 0
-        print(f"No checkpoint found at {checkpoint_path}, starting from scratch")
+        print(f"No model found at {checkpoint_path}, starting from scratch")
     
     print(f"Starting training for {epochs} epochs...")
     print(f"Expected batch shape: [batch_size, {seq_len}, {latent_dim}, 32, 18]")
@@ -173,23 +172,9 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
         # Step scheduler
         scheduler.step(avg_loss)
         
-        # Save checkpoint with more info
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'loss': avg_loss,
-            'model_config': {
-                'latent_dim': latent_dim,
-                'seq_len': seq_len,
-                'd_model': d_model,
-                'n_layers': n_layers,
-                'n_heads': n_heads
-            }
-        }
-        save_file(checkpoint, checkpoint_path)
-        print(f"Checkpoint saved as '{checkpoint_path}'")
+        # Save only the model state dict
+        save_file(model.state_dict(), checkpoint_path)
+        print(f"Model saved as '{checkpoint_path}'")
 
 
 if __name__ == "__main__":
