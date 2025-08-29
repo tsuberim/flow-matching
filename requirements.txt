@@ -11,4 +11,5 @@ wandb
 safetensors
 h5py
 huggingface_hub[cli]
+torchao
 torchtune
