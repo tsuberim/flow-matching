@@ -113,8 +113,13 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     # Wrap model in DataParallel for multi-GPU training
     num_gpus = t.cuda.device_count()
     if num_gpus > 1:
+        # Ensure CUDA context is properly initialized for multi-GPU
+        t.cuda.set_device(0)  # Set primary device
+        
         model = DataParallel(model)
         print(f"Using DataParallel with {num_gpus} GPUs")
+        print(f"Primary GPU: {t.cuda.get_device_name(0)}")
+        print(f"All GPUs: {[t.cuda.get_device_name(i) for i in range(num_gpus)]}")
         
         # Automatically adjust batch size for multi-GPU training
         original_batch_size = batch_size
