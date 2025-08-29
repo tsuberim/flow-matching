@@ -116,10 +116,14 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
         # Ensure CUDA context is properly initialized for multi-GPU
         t.cuda.set_device(0)  # Set primary device
         
-        model = DataParallel(model)
+        # Create model and move to GPU before wrapping in DataParallel
+        model = model.to('cuda:0')
+        model = DataParallel(model, device_ids=list(range(num_gpus)))
+        
         print(f"Using DataParallel with {num_gpus} GPUs")
         print(f"Primary GPU: {t.cuda.get_device_name(0)}")
         print(f"All GPUs: {[t.cuda.get_device_name(i) for i in range(num_gpus)]}")
+        print(f"Model device: {next(model.parameters()).device}")
         
         # Automatically adjust batch size for multi-GPU training
         original_batch_size = batch_size
@@ -133,10 +137,31 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
             shuffle=True, 
             num_workers=0
         )
+        
+        # Verify DataParallel is working
+        print(f"DataParallel module count: {len(model.module._modules)}")
+        print(f"DataParallel device_ids: {model.device_ids}")
     else:
         print(f"Single GPU training on {device}")
     
     print(f"Created DiT model with {sum(p.numel() for p in model.parameters()):,} parameters")
+    
+    # Test multi-GPU setup if applicable
+    if t.cuda.device_count() > 1:
+        print(f"\nTesting multi-GPU setup...")
+        # Create a test batch
+        test_batch = t.randn(2, seq_len, latent_dim, 32, 18).to(device)
+        print(f"Test batch device: {test_batch.device}")
+        
+        with t.no_grad():
+            output = model(test_batch)
+            print(f"Output device: {output.device}")
+            print(f"Output shape: {output.shape}")
+        
+        # Check which GPUs are actually being used
+        for i in range(t.cuda.device_count()):
+            memory_used = t.cuda.memory_allocated(i) / 1024**3
+            print(f"GPU {i} memory after test: {memory_used:.2f}GB")
     
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.7)
@@ -193,12 +218,11 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
             })
             
             # Log batch loss to wandb (less frequent to avoid spam)
-            if batch_idx % 10 == 0:  # Log every 10 batches
-                wandb.log({
-                    "batch_loss": loss.item(),
-                    "batch": batch_idx,
-                    "epoch": epoch + 1
-                })
+            wandb.log({
+                "batch_loss": loss.item(),
+                "batch": batch_idx,
+                "epoch": epoch + 1
+            })
         
         avg_loss = total_loss / len(train_loader)
         current_lr = optimizer.param_groups[0]['lr']
@@ -212,6 +236,19 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
             "learning_rate": current_lr,
             "epoch_time": None  # Could add timing if needed
         })
+        
+        # Log GPU utilization if using multiple GPUs
+        if t.cuda.device_count() > 1:
+            gpu_utilization = []
+            for i in range(t.cuda.device_count()):
+                gpu_memory = t.cuda.memory_allocated(i) / 1024**3  # GB
+                gpu_utilization.append(gpu_memory)
+            
+            print(f"GPU Memory Usage: {[f'{u:.2f}GB' for u in gpu_utilization]}")
+            
+            # Log to wandb
+            for i, util in enumerate(gpu_utilization):
+                wandb.log({f"gpu_{i}_memory_gb": util})
         
         # Step scheduler
         scheduler.step(avg_loss)
