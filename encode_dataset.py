@@ -108,7 +108,13 @@ def encode_dataset(vae_checkpoint_path, h5_path, output_dir="encodings", batch_s
             frames_flat = frames.view(b * t, c, h, w)
             
             # Encode frames to get distribution parameters
-            mu, logvar = vae.encode(frames_flat)
+            # For DataParallel, we need to extract mu, logvar from forward pass
+            if isinstance(vae, torch.nn.DataParallel):
+                # Use forward pass which is DataParallel compatible
+                _, mu, logvar = vae(frames_flat)
+            else:
+                # Single GPU: use encode method directly
+                mu, logvar = vae.encode(frames_flat)
             
             # Reshape back to batch format
             mu = mu.view(b, t, *mu.shape[1:])
