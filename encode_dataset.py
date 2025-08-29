@@ -13,7 +13,7 @@ from video_dataset2 import create_dataset
 from utils import get_device
 
 
-def encode_dataset(vae_checkpoint_path, h5_path, output_path, batch_size=32, latent_dim=16, 
+def encode_dataset(vae_checkpoint_path, h5_path, output_dir="encodings", batch_size=32, latent_dim=16, 
                   model_size=2, num_frames=None, sequence_length=1):
     """
     Encode video dataset using trained VAE
@@ -21,7 +21,7 @@ def encode_dataset(vae_checkpoint_path, h5_path, output_path, batch_size=32, lat
     Args:
         vae_checkpoint_path: path to trained VAE checkpoint
         h5_path: path to video dataset H5 file
-        output_path: path to save encoded dataset
+        output_dir: directory to save encoded dataset
         batch_size: batch size for encoding
         latent_dim: VAE latent dimension
         model_size: VAE model size
@@ -30,6 +30,15 @@ def encode_dataset(vae_checkpoint_path, h5_path, output_path, batch_size=32, lat
     """
     device = get_device()
     print(f"Using device: {device}")
+    
+    # Extract video hash from input filename and construct output path
+    h5_basename = os.path.basename(h5_path)
+    video_hash = os.path.splitext(h5_basename)[0]  # Remove .h5 extension
+    output_filename = f"{video_hash}_encoded_dim{latent_dim}_size{model_size}.h5"
+    output_path = os.path.join(output_dir, output_filename)
+    
+    print(f"Video hash: {video_hash}")
+    print(f"Output will be saved to: {output_path}")
     
     # Load VAE model
     print(f"Loading VAE from: {vae_checkpoint_path}")
@@ -81,8 +90,8 @@ def encode_dataset(vae_checkpoint_path, h5_path, output_path, batch_size=32, lat
     print(f"  Batch size: {batch_size}")
     print(f"  Number of batches: {len(dataloader):,}")
     
-    # Prepare output file
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+    # Prepare output directory
+    os.makedirs(output_dir, exist_ok=True)
     
     # Encode dataset
     print(f"Encoding dataset to: {output_path}")
@@ -170,8 +179,8 @@ def create_arg_parser():
                        help="Path to trained VAE checkpoint (.safetensors)")
     parser.add_argument("--input_h5", type=str, required=True,
                        help="Path to input video dataset (.h5)")
-    parser.add_argument("--output_h5", type=str, required=True,
-                       help="Path to output encoded dataset (.h5)")
+    parser.add_argument("--output_dir", type=str, default="encodings",
+                       help="Output directory for encoded dataset (default: encodings)")
     
     # VAE parameters
     parser.add_argument("--latent_dim", type=int, default=16,
@@ -202,7 +211,7 @@ if __name__ == "__main__":
     encode_dataset(
         vae_checkpoint_path=args.vae_checkpoint,
         h5_path=args.input_h5,
-        output_path=args.output_h5,
+        output_dir=args.output_dir,
         batch_size=args.batch_size,
         latent_dim=args.latent_dim,
         model_size=args.model_size,
