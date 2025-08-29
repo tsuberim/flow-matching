@@ -10,7 +10,7 @@ from utils import get_device
 from einops import rearrange
 
 def load_encoded_data(batch_size=64, encoded_h5_path=None, latent_dim=16, seq_len=32, 
-                     num_sequences=None, sample_latents=True):
+                     num_sequences=None, sample_latents=True, max_frames=None):
     """Load encoded dataset from H5 file"""
     if encoded_h5_path is None:
         # Try to find encoded dataset automatically
@@ -26,7 +26,8 @@ def load_encoded_data(batch_size=64, encoded_h5_path=None, latent_dim=16, seq_le
         h5_path=encoded_h5_path,
         sequence_length=seq_len,
         num_sequences=num_sequences,
-        sample_latents=sample_latents
+        sample_latents=sample_latents,
+        max_frames=max_frames
     )
     
     train_loader = DataLoader(
@@ -67,13 +68,13 @@ def compute_loss(model, batch):
 
 def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent_dim=16, 
                 seq_len=32, d_model=512, n_layers=6, n_heads=8, num_sequences=None, 
-                sample_latents=True):
+                sample_latents=True, max_frames=None):
     """Train the DiT flow matching model on encoded sequences"""
     device = get_device()
     
     # Load encoded data
     train_loader = load_encoded_data(batch_size, encoded_h5_path, latent_dim, seq_len, 
-                                   num_sequences, sample_latents)
+                                   num_sequences, sample_latents, max_frames)
     
     # Create DiT model
     model = create_dit_flow_model(
@@ -183,6 +184,7 @@ if __name__ == "__main__":
     parser.add_argument("--latent_dim", type=int, default=16, help="Latent dimension")
     parser.add_argument("--seq_len", type=int, default=32, help="Sequence length")
     parser.add_argument("--num_sequences", type=int, default=None, help="Number of sequences to use")
+    parser.add_argument("--max_frames", type=int, default=None, help="Maximum number of frames to load")
     parser.add_argument("--sample_latents", action="store_true", help="Sample from distribution")
     
     # Model parameters
@@ -209,5 +211,6 @@ if __name__ == "__main__":
         n_layers=args.n_layers,
         n_heads=args.n_heads,
         num_sequences=args.num_sequences,
+        max_frames=args.max_frames,
         sample_latents=args.sample_latents
     )

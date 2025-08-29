@@ -4,6 +4,7 @@ import h5py
 import numpy as np
 import random
 from typing import Optional, Tuple
+from tqdm import tqdm
 
 
 class EncodingDataset(Dataset):
@@ -13,7 +14,7 @@ class EncodingDataset(Dataset):
     """
     
     def __init__(self, h5_path: str, sequence_length: int = 8, num_sequences: Optional[int] = None, 
-                 sample_latents: bool = True, device: str = 'cpu'):
+                 sample_latents: bool = True, device: str = 'cpu', max_frames: Optional[int] = None):
         """
         Initialize EncodingDataset
         
@@ -22,7 +23,8 @@ class EncodingDataset(Dataset):
             sequence_length: Length of sequences to sample
             num_sequences: Number of sequences to use (None for all available)
             sample_latents: Whether to sample from distribution or just return mu
-            device: Device to load tensors on
+            device: Device to load data on
+            max_frames: Maximum number of frames to load (None for all frames)
         """
         self.h5_path = h5_path
         self.sequence_length = sequence_length
@@ -54,8 +56,43 @@ class EncodingDataset(Dataset):
             
             # Load data into memory for fast access
             print("Loading mu and logvar into memory...")
-            self.mu_data = torch.from_numpy(f['mu'][...]).float()
-            self.logvar_data = torch.from_numpy(f['logvar'][...]).float()
+            
+            # Determine how many frames to load
+            total_frames_in_file = self.mu_shape[0]
+            
+            # Apply max_frames limit first if specified
+            if max_frames is not None:
+                total_frames_in_file = min(total_frames_in_file, max_frames)
+            
+            # Then apply num_sequences limit if specified
+            if num_sequences is not None and self.original_sequence_length == 1:
+                frames_to_load = min(num_sequences, total_frames_in_file)
+            else:
+                frames_to_load = total_frames_in_file
+            
+            print(f"  Loading {frames_to_load:,} frames out of {total_frames_in_file:,} available...")
+            
+            # Load with progress bar
+            with tqdm(total=frames_to_load, desc="Loading frames", unit="frames") as pbar:
+                # Load in chunks for better progress tracking
+                chunk_size = min(1000, max(100, frames_to_load // 50))
+                mu_chunks = []
+                logvar_chunks = []
+                
+                for start_idx in range(0, frames_to_load, chunk_size):
+                    end_idx = min(start_idx + chunk_size, frames_to_load)
+                    
+                    mu_chunk = torch.from_numpy(f['mu'][start_idx:end_idx]).float()
+                    logvar_chunk = torch.from_numpy(f['logvar'][start_idx:end_idx]).float()
+                    
+                    mu_chunks.append(mu_chunk)
+                    logvar_chunks.append(logvar_chunk)
+                    
+                    pbar.update(end_idx - start_idx)
+                
+                # Concatenate chunks
+                self.mu_data = torch.cat(mu_chunks, dim=0)
+                self.logvar_data = torch.cat(logvar_chunks, dim=0)
         
         # Calculate available sequences based on requested sequence length
         if self.original_sequence_length == 1:
@@ -200,7 +237,7 @@ class EncodingDataset(Dataset):
 
 
 def create_encoding_dataset(h5_path: str, sequence_length: int = 8, num_sequences: Optional[int] = None,
-                          sample_latents: bool = True, device: str = 'cpu') -> EncodingDataset:
+                          sample_latents: bool = True, device: str = 'cpu', max_frames: Optional[int] = None) -> EncodingDataset:
     """
     Factory function to create an EncodingDataset
     
@@ -210,6 +247,7 @@ def create_encoding_dataset(h5_path: str, sequence_length: int = 8, num_sequence
         num_sequences: Number of sequences to use (None for all)
         sample_latents: Whether to sample from distribution or return mu
         device: Device to load data on
+        max_frames: Maximum number of frames to load (None for all frames)
         
     Returns:
         EncodingDataset instance
@@ -219,7 +257,8 @@ def create_encoding_dataset(h5_path: str, sequence_length: int = 8, num_sequence
         sequence_length=sequence_length,
         num_sequences=num_sequences,
         sample_latents=sample_latents,
-        device=device
+        device=device,
+        max_frames=max_frames
     )
 
 
@@ -237,6 +276,7 @@ if __name__ == "__main__":
     parser.add_argument("--h5_path", type=str, required=True, help="Path to encoded H5 file")
     parser.add_argument("--sequence_length", type=int, default=32, help="Sequence length")
     parser.add_argument("--num_sequences", type=int, default=None, help="Number of sequences")
+    parser.add_argument("--max_frames", type=int, default=None, help="Maximum number of frames to load")
     parser.add_argument("--sample_latents", action="store_true", help="Sample latents vs return mu")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for testing")
     parser.add_argument("--vae_checkpoint", type=str, help="Path to VAE checkpoint for decoding")
@@ -252,7 +292,8 @@ if __name__ == "__main__":
         h5_path=args.h5_path,
         sequence_length=args.sequence_length,
         num_sequences=args.num_sequences,
-        sample_latents=args.sample_latents
+        sample_latents=args.sample_latents,
+        max_frames=args.max_frames
     )
     
     # Test dataset
