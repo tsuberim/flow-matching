@@ -33,14 +33,8 @@ def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_p
     ).to(device)
     
     try:
-        # Try safetensors first, then fallback to .pth
-        if dit_model_path.endswith('.safetensors'):
-            model_state_dict = load_file(dit_model_path)
-            dit_model.load_state_dict(model_state_dict)
-        else:
-            checkpoint = t.load(dit_model_path, map_location=device)
-            dit_model.load_state_dict(checkpoint['model_state_dict'])
-        
+        model_state_dict = load_file(dit_model_path)
+        dit_model.load_state_dict(model_state_dict)
         dit_model.eval()
         print(f"Loaded DiT model from {dit_model_path}")
     except FileNotFoundError:
@@ -53,7 +47,6 @@ def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_p
     vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
     
     try:
-        from safetensors.torch import load_file
         model_state = load_file(vae_checkpoint_path)
         vae.load_state_dict(model_state)
         vae.eval()
