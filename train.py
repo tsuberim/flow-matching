@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.nn.parallel import DataParallel
 from tqdm import tqdm
 from dit import create_dit_flow_model
 from encoding_dataset import create_encoding_dataset
@@ -67,7 +68,7 @@ def compute_loss(model, batch):
     return nn.functional.mse_loss(v_pred, v_target)
 
 def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent_dim=16, 
-                seq_len=32, d_model=512, n_layers=6, n_heads=8, num_sequences=None, 
+                seq_len=32, d_model=512, n_layers=6, n_heads=16, num_sequences=None, 
                 sample_latents=True, max_frames=None):
     """Train the DiT flow matching model on encoded sequences"""
     device = get_device()
@@ -87,6 +88,13 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
         dropout=0.1
     ).to(device)
     
+    # Wrap model in DataParallel for multi-GPU training
+    if t.cuda.device_count() > 1:
+        model = DataParallel(model)
+        print(f"Using DataParallel with {t.cuda.device_count()} GPUs")
+    else:
+        print(f"Single GPU training on {device}")
+    
     print(f"Created DiT model with {sum(p.numel() for p in model.parameters()):,} parameters")
     
     optimizer = optim.Adam(model.parameters(), lr=lr)
@@ -96,7 +104,18 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     checkpoint_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.pth'
     try:
         checkpoint = t.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Handle DataParallel loading
+        model_state_dict = checkpoint['model_state_dict']
+        if isinstance(model, DataParallel):
+            # Remove 'module.' prefix if checkpoint was saved from DataParallel
+            if any(key.startswith('module.') for key in model_state_dict.keys()):
+                model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
+            # Add 'module.' prefix if checkpoint was saved from single GPU
+            else:
+                model_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
+        
+        model.load_state_dict(model_state_dict)
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"Loaded checkpoint from {checkpoint_path}, resuming from epoch {start_epoch}")
