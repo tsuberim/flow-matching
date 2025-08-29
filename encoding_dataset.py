@@ -94,10 +94,6 @@ class EncodingDataset(Dataset):
                 self.mu_data = torch.cat(mu_chunks, dim=0)
                 self.logvar_data = torch.cat(logvar_chunks, dim=0)
         
-        # Limit number of sequences if requested
-        if num_sequences is not None:
-            self.available_sequences = min(self.available_sequences, num_sequences)
-        
         # Calculate available sequences based on requested sequence length
         # This must be done AFTER loading data to get actual loaded size
         if self.original_sequence_length == 1:
@@ -113,6 +109,10 @@ class EncodingDataset(Dataset):
                 raise ValueError(f"Requested sequence length ({sequence_length}) > original sequence length ({self.original_sequence_length}). "
                                f"Cannot create longer sequences without padding.")
             self.available_sequences = self.mu_data.shape[0]  # Use original sequences
+        
+        # Limit number of sequences if requested
+        if num_sequences is not None:
+            self.available_sequences = min(self.available_sequences, num_sequences)
         
         print(f"  Available sequences: {self.available_sequences:,}")
         print(f"  Requested sequence length: {sequence_length}")
