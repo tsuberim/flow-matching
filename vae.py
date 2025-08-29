@@ -19,32 +19,21 @@ class VideoVAE(nn.Module):
         
         # Improved Encoder with BatchNorm and more layers
         self.encoder = nn.Sequential(
-            # 320x180 -> 160x90
             nn.Conv2d(3, 32 * model_size, 4, stride=1, padding=1),
             nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
-
-            # 160x90 -> 80x45
             nn.Conv2d(32 * model_size, 64 * model_size, 4, stride=1, padding=1),
             nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
-
-            # 80x45 -> 40x23
             nn.Conv2d(64 * model_size, 128 * model_size, (4, 9), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-
-            # Additional layer 1: 40x23 -> 20x12
             nn.Conv2d(128 * model_size, 128 * model_size, (8, 14), stride=1, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-
-            # Additional layer 2: 20x12 -> 10x6
             nn.Conv2d(128 * model_size, 128 * model_size, (6, 10), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-
-            # Final layer: 10x6 -> 5x3
             nn.Conv2d(128 * model_size, 256 * model_size, (8, 8), stride=2, padding=1),
             nn.BatchNorm2d(256 * model_size),
             nn.ReLU(),
@@ -59,32 +48,21 @@ class VideoVAE(nn.Module):
         self.decoder_input = nn.Conv2d(latent_dim, 256 * model_size, 1)
 
         self.decoder = nn.Sequential(
-            # 18x32 -> 36x64
             nn.ConvTranspose2d(256 * model_size, 128 * model_size, 8, stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-
-            # 36x64 -> 72x128
             nn.ConvTranspose2d(128 * model_size, 128 * model_size, (8, 14), stride=2, padding=1),
             nn.BatchNorm2d(128 * model_size),
             nn.ReLU(),
-
-            # 72x128 -> 144x256
             nn.ConvTranspose2d(128 * model_size, 64 * model_size, (8, 16), stride=1, padding=1),
             nn.BatchNorm2d(64 * model_size),
             nn.ReLU(),
-
-            # 144x256 -> adjust to get closer to target size
             nn.ConvTranspose2d(64 * model_size, 32 * model_size, (7, 7), stride=2, padding=1),
             nn.BatchNorm2d(32 * model_size),
             nn.ReLU(),
-
-            # Final refinement
             nn.Conv2d(32 * model_size, 16 * model_size, 4, padding=1),
             nn.BatchNorm2d(16 * model_size),
             nn.ReLU(),
-
-            # Output layer
             nn.Conv2d(16 * model_size, 3, 3, padding=1),
             nn.Tanh()
         )
