@@ -10,6 +10,7 @@ from vae import create_video_vae
 from video_dataset2 import create_dataset
 from utils import get_device
 from torch.utils.data import DataLoader
+from safetensors.torch import load_file
 
 
 def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_path=None,
@@ -19,7 +20,7 @@ def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_p
     
     # Load DiT model
     if dit_model_path is None:
-        dit_model_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.pth'
+        dit_model_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.safetensors'
     
     dit_model = create_dit_flow_model(
         input_spatial_shape=(32, 18),
@@ -32,11 +33,16 @@ def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_p
     ).to(device)
     
     try:
-        checkpoint = t.load(dit_model_path, map_location=device)
-        dit_model.load_state_dict(checkpoint['model_state_dict'])
+        # Try safetensors first, then fallback to .pth
+        if dit_model_path.endswith('.safetensors'):
+            model_state_dict = load_file(dit_model_path)
+            dit_model.load_state_dict(model_state_dict)
+        else:
+            checkpoint = t.load(dit_model_path, map_location=device)
+            dit_model.load_state_dict(checkpoint['model_state_dict'])
+        
         dit_model.eval()
         print(f"Loaded DiT model from {dit_model_path}")
-        print(f"Model config: {checkpoint.get('model_config', 'Not available')}")
     except FileNotFoundError:
         raise FileNotFoundError(f"DiT model checkpoint not found: {dit_model_path}")
     
