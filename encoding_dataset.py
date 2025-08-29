@@ -188,6 +188,7 @@ class EncodingDataset(Dataset):
         if self.original_sequence_length == 1:
             start_idx = idx
             end_idx = start_idx + self.sequence_length
+            
             mu_seq = self.mu_data[start_idx:end_idx, 0]  # Remove the singleton dimension
             logvar_seq = self.logvar_data[start_idx:end_idx, 0]
         else:
