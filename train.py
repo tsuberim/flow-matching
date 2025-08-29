@@ -9,6 +9,7 @@ from dit import create_dit_flow_model
 from encoding_dataset import create_encoding_dataset
 from utils import get_device
 from einops import rearrange
+from safetensors.torch import save_file, load_file
 
 def load_encoded_data(batch_size=64, encoded_h5_path=None, latent_dim=16, seq_len=32, 
                      num_sequences=None, sample_latents=True, max_frames=None):
@@ -89,9 +90,23 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     ).to(device)
     
     # Wrap model in DataParallel for multi-GPU training
-    if t.cuda.device_count() > 1:
+    num_gpus = t.cuda.device_count()
+    if num_gpus > 1:
         model = DataParallel(model)
-        print(f"Using DataParallel with {t.cuda.device_count()} GPUs")
+        print(f"Using DataParallel with {num_gpus} GPUs")
+        
+        # Automatically adjust batch size for multi-GPU training
+        original_batch_size = batch_size
+        batch_size = batch_size * num_gpus
+        print(f"Adjusted batch size: {original_batch_size} → {batch_size} (×{num_gpus} GPUs)")
+        
+        # Recreate DataLoader with adjusted batch size
+        train_loader = DataLoader(
+            train_loader.dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
+            num_workers=0
+        )
     else:
         print(f"Single GPU training on {device}")
     
@@ -101,21 +116,10 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.7)
     
     # Load checkpoint if exists
-    checkpoint_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.pth'
+    checkpoint_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.safetensors'
     try:
-        checkpoint = t.load(checkpoint_path, map_location=device)
-        
-        # Handle DataParallel loading
-        model_state_dict = checkpoint['model_state_dict']
-        if isinstance(model, DataParallel):
-            # Remove 'module.' prefix if checkpoint was saved from DataParallel
-            if any(key.startswith('module.') for key in model_state_dict.keys()):
-                model_state_dict = {k.replace('module.', ''): v for k, v in model_state_dict.items()}
-            # Add 'module.' prefix if checkpoint was saved from single GPU
-            else:
-                model_state_dict = {f'module.{k}': v for k, v in model_state_dict.items()}
-        
-        model.load_state_dict(model_state_dict)
+        checkpoint = load_file(checkpoint_path, device=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         print(f"Loaded checkpoint from {checkpoint_path}, resuming from epoch {start_epoch}")
@@ -184,7 +188,7 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
                 'n_heads': n_heads
             }
         }
-        t.save(checkpoint, checkpoint_path)
+        save_file(checkpoint, checkpoint_path)
         print(f"Checkpoint saved as '{checkpoint_path}'")
 
 
