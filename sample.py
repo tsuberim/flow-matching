@@ -513,9 +513,9 @@ def main():
     dit_model, vae, device = load_models(
         latent_dim=latent_dim,
         seq_len=seq_len,
-        d_model=256,
-        n_layers=4,
-        n_heads=8
+        d_model=768,
+        n_layers=6,
+        n_heads=16
     )
     
     print("\n1. Sampling initial frames from video...")

@@ -10,6 +10,7 @@ from encoding_dataset import create_encoding_dataset
 from utils import get_device
 from einops import rearrange
 from safetensors.torch import save_file, load_file
+import wandb
 
 def load_encoded_data(batch_size=64, encoded_h5_path=None, latent_dim=16, seq_len=32, 
                      num_sequences=None, sample_latents=True, max_frames=None):
@@ -70,9 +71,29 @@ def compute_loss(model, batch):
 
 def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent_dim=16, 
                 seq_len=32, d_model=512, n_layers=6, n_heads=16, num_sequences=None, 
-                sample_latents=True, max_frames=None):
+                sample_latents=True, max_frames=None, project_name="flow-matching", run_name=None):
     """Train the DiT flow matching model on encoded sequences"""
     device = get_device()
+    
+    # Initialize wandb
+    wandb.init(
+        project=project_name,
+        name=run_name,
+        config={
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": lr,
+            "latent_dim": latent_dim,
+            "seq_len": seq_len,
+            "d_model": d_model,
+            "n_layers": n_layers,
+            "n_heads": n_heads,
+            "num_sequences": num_sequences,
+            "sample_latents": sample_latents,
+            "max_frames": max_frames,
+            "device": str(device)
+        }
+    )
     
     # Load encoded data
     train_loader = load_encoded_data(batch_size, encoded_h5_path, latent_dim, seq_len, 
@@ -165,9 +186,27 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
                 'Loss': f'{loss.item():.4f}',
                 'LR': f'{optimizer.param_groups[0]["lr"]:.2e}'
             })
+            
+            # Log batch loss to wandb (less frequent to avoid spam)
+            if batch_idx % 10 == 0:  # Log every 10 batches
+                wandb.log({
+                    "batch_loss": loss.item(),
+                    "batch": batch_idx,
+                    "epoch": epoch + 1
+                })
         
         avg_loss = total_loss / len(train_loader)
-        print(f'Epoch {epoch+1}/{start_epoch + epochs}, Average Loss: {avg_loss:.4f}')
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        print(f'Epoch {epoch+1}/{start_epoch + epochs}, Average Loss: {avg_loss:.4f}, LR: {current_lr:.2e}')
+        
+        # Log to wandb
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_loss,
+            "learning_rate": current_lr,
+            "epoch_time": None  # Could add timing if needed
+        })
         
         # Step scheduler
         scheduler.step(avg_loss)
@@ -175,6 +214,9 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
         # Save only the model state dict
         save_file(model.state_dict(), checkpoint_path)
         print(f"Model saved as '{checkpoint_path}'")
+    
+    # Finish wandb run
+    wandb.finish()
 
 
 if __name__ == "__main__":
@@ -200,6 +242,10 @@ if __name__ == "__main__":
     parser.add_argument("--n_layers", type=int, default=6, help="Number of layers")
     parser.add_argument("--n_heads", type=int, default=16, help="Number of attention heads")
     
+    # Wandb parameters
+    parser.add_argument("--project_name", type=str, default="flow-matching", help="Wandb project name")
+    parser.add_argument("--run_name", type=str, default=None, help="Wandb run name")
+    
     args = parser.parse_args()
     
     print("Training DiT flow matching model on encoded dataset...")
@@ -220,5 +266,7 @@ if __name__ == "__main__":
         n_heads=args.n_heads,
         num_sequences=args.num_sequences,
         max_frames=args.max_frames,
-        sample_latents=args.sample_latents
+        sample_latents=args.sample_latents,
+        project_name=args.project_name,
+        run_name=args.run_name
     )
