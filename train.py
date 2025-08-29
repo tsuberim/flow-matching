@@ -5,28 +5,50 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 from dit import create_dit_flow_model
-from embedding_dataset import create_embedding_dataset
+from encoding_dataset import create_encoding_dataset
 from utils import get_device
 from einops import rearrange
 
-def load_embedding_data(batch_size=64, num_frames=10000, latent_dim=16, seq_len=32):
-    """Load embedding dataset - now returns sequences of length 32"""
-    dataset = create_embedding_dataset(
-        num_frames=num_frames,
-        latent_dim=latent_dim,
-        batch_size=32  # Batch size for VAE embedding process
+def load_encoded_data(batch_size=64, encoded_h5_path=None, latent_dim=16, seq_len=32, 
+                     num_sequences=None, sample_latents=True):
+    """Load encoded dataset from H5 file"""
+    if encoded_h5_path is None:
+        # Try to find encoded dataset automatically
+        import glob
+        encoded_files = glob.glob("encodings/*_encoded_dim*.h5")
+        if encoded_files:
+            encoded_h5_path = encoded_files[0]
+            print(f"Auto-detected encoded dataset: {encoded_h5_path}")
+        else:
+            raise FileNotFoundError("No encoded dataset found. Please specify --encoded_h5_path or run encode_dataset.py first")
+    
+    dataset = create_encoding_dataset(
+        h5_path=encoded_h5_path,
+        sequence_length=seq_len,
+        num_sequences=num_sequences,
+        sample_latents=sample_latents
     )
     
     train_loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=True, num_workers=0
     )
     
-    print(f"Loaded embedding dataset: {len(dataset)} sequence samples")
-    info = dataset.get_embedding_info()
-    print(f"Total embeddings: {info['num_embeddings']}")
-    print(f"Sequences available: {len(dataset)} (length {seq_len})")
-    print(f"Each sequence shape: [seq_len, latent_dim, height, width] = [32, 16, 32, 18]")
-    print(f"Embedding range: [{info['range'][0]:.3f}, {info['range'][1]:.3f}]")
+    print(f"Loaded encoded dataset: {len(dataset)} sequence samples")
+    info = dataset.get_info()
+    print(f"Dataset info:")
+    print(f"  Total sequences: {info['total_sequences']}")
+    print(f"  Sequence length: {info['sequence_length']}")
+    print(f"  Latent dim: {info['latent_dim']}")
+    print(f"  Model size: {info['model_size']}")
+    print(f"  Original frame size: {info['original_frame_size']}")
+    print(f"  VAE checkpoint: {info['vae_checkpoint_path']}")
+    print(f"  Sample latents: {info['sample_latents']}")
+    
+    # Get latent statistics
+    stats = dataset.get_latent_statistics()
+    print(f"Latent statistics:")
+    print(f"  Mu range: [{stats['mu_mean']:.3f} ± {stats['mu_std']:.3f}]")
+    print(f"  Variance range: [{stats['variance_mean']:.3f} ± {stats['variance_std']:.3f}]")
     
     return train_loader
 
@@ -43,13 +65,15 @@ def compute_loss(model, batch):
     v_target = target - prior
     return nn.functional.mse_loss(v_pred, v_target)
 
-def train_model(epochs=100, batch_size=32, lr=1e-4, num_frames=10000, latent_dim=16, 
-                seq_len=32, d_model=512, n_layers=6, n_heads=8):
-    """Train the DiT flow matching model on embedding sequences"""
+def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent_dim=16, 
+                seq_len=32, d_model=512, n_layers=6, n_heads=8, num_sequences=None, 
+                sample_latents=True):
+    """Train the DiT flow matching model on encoded sequences"""
     device = get_device()
     
-    # Load embedding data
-    train_loader = load_embedding_data(batch_size, num_frames, latent_dim, seq_len)
+    # Load encoded data
+    train_loader = load_encoded_data(batch_size, encoded_h5_path, latent_dim, seq_len, 
+                                   num_sequences, sample_latents)
     
     # Create DiT model
     model = create_dit_flow_model(
@@ -145,14 +169,45 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, num_frames=10000, latent_dim
 
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train DiT flow matching model on encoded dataset")
+    
+    # Training parameters
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=384, help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    
+    # Data parameters
+    parser.add_argument("--encoded_h5", type=str, default=None, help="Path to encoded H5 file")
+    parser.add_argument("--latent_dim", type=int, default=16, help="Latent dimension")
+    parser.add_argument("--seq_len", type=int, default=32, help="Sequence length")
+    parser.add_argument("--num_sequences", type=int, default=None, help="Number of sequences to use")
+    parser.add_argument("--sample_latents", action="store_true", help="Sample from distribution")
+    
+    # Model parameters
+    parser.add_argument("--d_model", type=int, default=256, help="Model dimension")
+    parser.add_argument("--n_layers", type=int, default=4, help="Number of layers")
+    parser.add_argument("--n_heads", type=int, default=8, help="Number of attention heads")
+    
+    args = parser.parse_args()
+    
+    print("Training DiT flow matching model on encoded dataset...")
+    print(f"Parameters:")
+    for arg, value in vars(args).items():
+        print(f"  {arg}: {value}")
+    print()
+    
     train_model(
-        epochs=50,
-        batch_size=256 + 128,      # Smaller batch size for sequences
-        lr=1e-4,           # Lower learning rate for stability
-        num_frames=10000,
-        latent_dim=16,
-        seq_len=32,
-        d_model=256,       # Smaller model for faster training
-        n_layers=4,        # Fewer layers
-        n_heads=8
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        encoded_h5_path=args.encoded_h5,
+        latent_dim=args.latent_dim,
+        seq_len=args.seq_len,
+        d_model=args.d_model,
+        n_layers=args.n_layers,
+        n_heads=args.n_heads,
+        num_sequences=args.num_sequences,
+        sample_latents=args.sample_latents
     )

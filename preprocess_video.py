@@ -31,7 +31,7 @@ def analyze_video(video_path, target_fps=12, skip_seconds=30.0):
     original_fps = cap.get(cv2.CAP_PROP_FPS)
     duration = total_frames / original_fps
 
-    total_frames = 1000
+    total_frames = 10000
     
     # Calculate frame sampling
     target_frame_interval = 1.0 / target_fps

@@ -7,7 +7,7 @@ import cv2
 from scipy.integrate import solve_ivp
 from dit import create_dit_flow_model
 from vae import create_video_vae
-from video_dataset import create_video_dataset
+from video_dataset2 import create_dataset
 from utils import get_device
 from torch.utils.data import DataLoader
 
@@ -42,27 +42,23 @@ def load_models(latent_dim=16, seq_len=32, dit_model_path=None, vae_checkpoint_p
     
     # Load VAE
     if vae_checkpoint_path is None:
-        vae_checkpoint_path = f'vae_final_dim{latent_dim}.pth'
-        if not os.path.exists(vae_checkpoint_path):
-            vae_checkpoint_path = f'vae_checkpoint_dim{latent_dim}.pth'
+        vae_checkpoint_path = 'vae_checkpoint_dim16_size2.safetensors'
     
-    vae = create_video_vae(latent_dim=latent_dim).to(device)
+    vae = create_video_vae(latent_dim=latent_dim, model_size=2).to(device)
     
     try:
-        if 'final' in vae_checkpoint_path:
-            vae.load_state_dict(t.load(vae_checkpoint_path, map_location=device))
-        else:
-            checkpoint = t.load(vae_checkpoint_path, map_location=device)
-            vae.load_state_dict(checkpoint['model_state_dict'])
+        from safetensors.torch import load_file
+        model_state = load_file(vae_checkpoint_path)
+        vae.load_state_dict(model_state)
         vae.eval()
         print(f"Loaded VAE from {vae_checkpoint_path}")
-    except FileNotFoundError:
-        raise FileNotFoundError(f"VAE checkpoint not found: {vae_checkpoint_path}")
+    except Exception as e:
+        raise RuntimeError(f"Error loading VAE from {vae_checkpoint_path}: {e}")
     
     return dit_model, vae, device
 
 
-def sample_initial_frames(vae, device, batch_size=4, video_path=None):
+def sample_initial_frames(vae, device, batch_size=4, h5_path=None):
     """
     Sample random frames from video dataset and encode them with VAE
     
@@ -70,16 +66,20 @@ def sample_initial_frames(vae, device, batch_size=4, video_path=None):
         vae: trained VAE model
         device: torch device
         batch_size: number of initial frames to sample
-        video_path: path to video file
+        h5_path: path to preprocessed H5 file
     
     Returns:
         encoded frames: [batch_size, latent_dim, height, width]
     """
     print(f"Sampling {batch_size} random frames from video...")
     
+    # Use default H5 path if none provided
+    if h5_path is None:
+        h5_path = 'videos/pntCyf13iUQ.h5'
+    
     # Create video dataset with individual frames
-    video_dataset = create_video_dataset(
-        video_path=video_path,
+    video_dataset = create_dataset(
+        h5_path=h5_path,
         num_frames=1000,  # Use a subset for faster sampling
         sequence_length=1  # Get individual frames
     )
@@ -524,7 +524,7 @@ def main():
         vae=vae,
         device=device,
         batch_size=batch_size,
-        video_path=None  # Uses auto-detected video
+        h5_path=None  # Uses default H5 file
     )
     print(f"Initial frames shape: {initial_frames.shape}")
     

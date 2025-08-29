@@ -226,16 +226,26 @@ def create_encoding_dataset(h5_path: str, sequence_length: int = 8, num_sequence
 if __name__ == "__main__":
     # Test the dataset
     import argparse
+    import matplotlib.pyplot as plt
     from torch.utils.data import DataLoader
+    from safetensors.torch import load_file
+    from vae import create_video_vae
+    from utils import get_device
+    import os
     
     parser = argparse.ArgumentParser(description="Test EncodingDataset")
     parser.add_argument("--h5_path", type=str, required=True, help="Path to encoded H5 file")
-    parser.add_argument("--sequence_length", type=int, default=8, help="Sequence length")
+    parser.add_argument("--sequence_length", type=int, default=32, help="Sequence length")
     parser.add_argument("--num_sequences", type=int, default=None, help="Number of sequences")
     parser.add_argument("--sample_latents", action="store_true", help="Sample latents vs return mu")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for testing")
+    parser.add_argument("--vae_checkpoint", type=str, help="Path to VAE checkpoint for decoding")
+    parser.add_argument("--save_images", action="store_true", help="Save decoded images")
     
     args = parser.parse_args()
+    
+    device = get_device()
+    print(f"Using device: {device}")
     
     # Create dataset
     dataset = create_encoding_dataset(
@@ -248,6 +258,11 @@ if __name__ == "__main__":
     # Test dataset
     print(f"\nTesting dataset:")
     print(f"Dataset length: {len(dataset)}")
+    
+    # Get dataset info for VAE parameters
+    info = dataset.get_info()
+    latent_dim = info['latent_dim']
+    model_size = info['model_size']
     
     # Get a sample
     sample = dataset[0]
@@ -280,4 +295,100 @@ if __name__ == "__main__":
             print(f"Sample {i+1} shape: {z.shape}")
             print(f"Sample {i+1} range: [{z.min().item():.3f}, {z.max().item():.3f}]")
     
-    print("EncodingDataset test completed successfully!")
+    # Decode and display first 32 frames if VAE checkpoint provided
+    if args.vae_checkpoint:
+        print(f"\n🔍 Decoding first 32 frames...")
+        
+        # Load VAE for decoding
+        print(f"Loading VAE from: {args.vae_checkpoint}")
+        vae = create_video_vae(latent_dim=latent_dim, model_size=model_size)
+        vae = vae.to(device)
+        vae.eval()
+        
+        # Load checkpoint
+        try:
+            model_state = load_file(args.vae_checkpoint)
+            
+            # Handle DataParallel loading
+            is_dataparallel_checkpoint = any(key.startswith('module.') for key in model_state.keys())
+            if is_dataparallel_checkpoint:
+                model_state = {k.replace('module.', ''): v for k, v in model_state.items()}
+            
+            vae.load_state_dict(model_state)
+            print(f"✅ VAE checkpoint loaded successfully")
+        except Exception as e:
+            print(f"❌ Error loading VAE checkpoint: {e}")
+            print("Skipping frame decoding...")
+        else:
+            # Get first 32 frames from dataset
+            frames_to_decode = min(32, len(dataset))
+            print(f"Decoding first {frames_to_decode} frames...")
+            
+            decoded_frames = []
+            with torch.no_grad():
+                for i in range(frames_to_decode):
+                    # Get frame data
+                    if args.sample_latents:
+                        frame_data = dataset[i]  # Already sampled
+                    else:
+                        mu, logvar = dataset.get_mu_logvar(i)
+                        frame_data = dataset.reparameterize(mu, logvar)
+                    
+                    # Decode through VAE
+                    frame_data = frame_data.to(device)
+                    if len(frame_data.shape) == 4:  # [seq_len, latent_dim, h, w]
+                        # Flatten sequence dimension for VAE
+                        frame_data = frame_data.view(-1, *frame_data.shape[1:])
+                    
+                    decoded = vae.decode(frame_data)
+                    
+                    # Take first frame if sequence
+                    if len(decoded.shape) == 4:  # [seq_len, 3, h, w]
+                        decoded = decoded[0]  # [3, h, w]
+                    
+                    # Convert to displayable format
+                    frame = decoded.cpu().numpy().transpose(1, 2, 0)  # CHW -> HWC
+                    frame = (frame + 1.0) / 2.0  # [-1,1] -> [0,1]
+                    frame = np.clip(frame, 0, 1)
+                    
+                    decoded_frames.append(frame)
+            
+            print(f"✅ Decoded {len(decoded_frames)} frames")
+            
+            # Display frames in a grid
+            num_frames = len(decoded_frames)
+            cols = 8
+            rows = (num_frames + cols - 1) // cols
+            
+            fig, axes = plt.subplots(rows, cols, figsize=(cols * 2, rows * 2))
+            if rows == 1:
+                axes = axes.reshape(1, -1)
+            elif cols == 1:
+                axes = axes.reshape(-1, 1)
+            
+            for i in range(rows * cols):
+                row = i // cols
+                col = i % cols
+                ax = axes[row, col]
+                
+                if i < num_frames:
+                    ax.imshow(decoded_frames[i])
+                    ax.set_title(f'Frame {i+1}', fontsize=8)
+                else:
+                    ax.text(0.5, 0.5, 'N/A', ha='center', va='center', 
+                           transform=ax.transAxes, fontsize=8)
+                
+                ax.axis('off')
+            
+            plt.suptitle(f'First {num_frames} Decoded Frames (Sequence Length: {args.sequence_length})', fontsize=14)
+            plt.tight_layout()
+            
+            if args.save_images:
+                output_dir = "test_outputs"
+                os.makedirs(output_dir, exist_ok=True)
+                plt.savefig(f"{output_dir}/first_32_frames.png", dpi=150, bbox_inches='tight')
+                print(f"💾 Saved frame grid to: {output_dir}/first_32_frames.png")
+            else:
+                plt.show()
+    
+    print("🎉 EncodingDataset test completed successfully!")
