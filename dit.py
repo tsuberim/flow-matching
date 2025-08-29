@@ -59,10 +59,10 @@ class DiTFlowModel(nn.Module):
         input_spatial_shape=(32, 18),  # Spatial dimensions of frame embeddings
         latent_dim=16,                 # Latent dimension per spatial location
         seq_len=32,                    # Sequence length
-        d_model=512,                   # Transformer hidden dimension
+        d_model=768,                   # Transformer hidden dimension
         n_layers=6,                    # Number of transformer layers
-        n_heads=8,                     # Number of attention heads
-        dropout=0.1
+        n_heads=16,                     # Number of attention heads
+        dropout=0.05
     ):
         super().__init__()
         

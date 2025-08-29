@@ -184,7 +184,7 @@ if __name__ == "__main__":
     
     # Training parameters
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=384, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     
     # Data parameters
@@ -196,9 +196,9 @@ if __name__ == "__main__":
     parser.add_argument("--sample_latents", action="store_true", help="Sample from distribution")
     
     # Model parameters
-    parser.add_argument("--d_model", type=int, default=256, help="Model dimension")
-    parser.add_argument("--n_layers", type=int, default=4, help="Number of layers")
-    parser.add_argument("--n_heads", type=int, default=8, help="Number of attention heads")
+    parser.add_argument("--d_model", type=int, default=768, help="Model dimension")
+    parser.add_argument("--n_layers", type=int, default=6, help="Number of layers")
+    parser.add_argument("--n_heads", type=int, default=16, help="Number of attention heads")
     
     args = parser.parse_args()
     
