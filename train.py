@@ -118,7 +118,7 @@ def train_model(epochs=100, batch_size=32, lr=1e-4, encoded_h5_path=None, latent
     # Load checkpoint if exists
     checkpoint_path = f'dit_flow_model_dim{latent_dim}_seq{seq_len}.safetensors'
     try:
-        checkpoint = load_file(checkpoint_path, device=device)
+        checkpoint = load_file(checkpoint_path)  # Load to CPU first
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
